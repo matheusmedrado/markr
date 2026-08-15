@@ -1,5 +1,9 @@
 # MarkR
 
+<p align="center">
+  <img src="assets/markr-logo.png" alt="MarkR logo" width="360">
+</p>
+
 Markdown deserves better than being opened in a browser tab called `final-final-v7.md`.
 
 MarkR is a terminal-first Markdown workspace for reading documentation with focus, structure and a little bit of personality. It is built in Rust with `ratatui` and `pulldown-cmark`, following The Elm Architecture from the first line of code.
