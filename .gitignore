@@ -1,0 +1,9 @@
+/target
+
+# Local editor and terminal files
+.DS_Store
+.idea/
+.vscode/
+
+# Private planning notes and session context
+/local/
