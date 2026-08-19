@@ -34,6 +34,7 @@ pub enum Message {
 pub struct App {
     pub workspace: Workspace,
     pub document: Document,
+    pub document_layout: layout::DocumentLayout,
     pub theme: Theme,
     pub images: ImageStore,
     pub focus: Focus,
@@ -61,10 +62,15 @@ impl App {
         let document_dir = document_dir(&workspace);
         let mut images = ImageStore::new(picker);
         images.load(document_dir.as_deref(), &document);
+        let theme = Theme::default();
+        let terminal_width: u16 = 120;
+        let document_width = terminal_width.saturating_sub(33).saturating_sub(5);
+        let document_layout = layout::build(&document, document_width, theme, &images);
         Ok(Self {
             workspace,
             document,
-            theme: Theme::default(),
+            document_layout,
+            theme,
             images,
             focus: Focus::Document,
             sidebar_panel: SidebarPanel::Outline,
@@ -73,7 +79,7 @@ impl App {
             file_selected: 0,
             sidebar_visible: true,
             help_visible: false,
-            terminal_width: 120,
+            terminal_width,
             terminal_height: 40,
             error: None,
             search_query: String::new(),
@@ -105,16 +111,19 @@ impl App {
     }
 
     fn max_scroll(&self) -> usize {
-        let document_layout = layout::build(
+        self.document_layout
+            .lines
+            .len()
+            .saturating_sub(self.document_height())
+    }
+
+    fn rebuild_layout(&mut self) {
+        self.document_layout = layout::build(
             &self.document,
             self.document_width(),
             self.theme,
             &self.images,
         );
-        document_layout
-            .lines
-            .len()
-            .saturating_sub(self.document_height())
     }
 
     fn clamp_scroll(&mut self) {
@@ -128,13 +137,18 @@ impl App {
     pub fn update(&mut self, message: Message) {
         match message {
             Message::Key(key) => {
+                let previous_width = self.document_width();
                 self.handle_key(key);
+                if self.document_width() != previous_width {
+                    self.rebuild_layout();
+                }
                 self.clamp_scroll();
             }
             Message::Tick => self.reload_if_changed(),
             Message::Resize { width, height } => {
                 self.terminal_width = width;
                 self.terminal_height = height;
+                self.rebuild_layout();
                 self.refresh_search();
                 self.clamp_scroll();
             }
@@ -222,13 +236,7 @@ impl App {
             return;
         }
 
-        let document_layout = layout::build(
-            &self.document,
-            self.document_width(),
-            self.theme,
-            &self.images,
-        );
-        self.search_matches = find_matches(&document_layout.lines, &self.search_query);
+        self.search_matches = find_matches(&self.document_layout.lines, &self.search_query);
         if self.search_matches.is_empty() {
             self.search_selected = 0;
         } else {
@@ -309,13 +317,7 @@ impl App {
 
     fn jump_to_selected_heading(&mut self) {
         if self.document.outline.get(self.outline_selected).is_some() {
-            let document_layout = layout::build(
-                &self.document,
-                self.document_width(),
-                self.theme,
-                &self.images,
-            );
-            if let Some(line) = document_layout.heading_line(self.outline_selected) {
+            if let Some(line) = self.document_layout.heading_line(self.outline_selected) {
                 self.scroll = line;
             }
             self.focus = Focus::Document;
@@ -382,6 +384,7 @@ impl App {
                 self.error = None;
                 let dir = document_dir(&self.workspace);
                 self.images.load(dir.as_deref(), &self.document);
+                self.rebuild_layout();
                 self.clear_search();
                 self.clamp_scroll();
             }
