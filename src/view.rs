@@ -4,7 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block as TuiBlock, Borders, Clear, List, ListItem, Paragraph};
 
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, SidebarPanel};
 use crate::layout;
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -57,7 +57,7 @@ fn render_body(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = if app.sidebar_visible {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(29), Constraint::Min(1)])
+            .constraints([Constraint::Length(app.sidebar_width()), Constraint::Min(1)])
             .split(area)
     } else {
         Layout::default()
@@ -67,7 +67,7 @@ fn render_body(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     if app.sidebar_visible {
-        render_outline(frame, app, chunks[0]);
+        render_sidebar(frame, app, chunks[0]);
     }
 
     let document_area = chunks[chunks.len() - 1];
@@ -85,6 +85,13 @@ fn render_body(frame: &mut Frame, app: &App, area: Rect) {
         .block(document_block)
         .scroll((app.scroll.min(u16::MAX as usize) as u16, 0));
     frame.render_widget(paragraph, document_area);
+}
+
+fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
+    match app.sidebar_panel {
+        SidebarPanel::Outline => render_outline(frame, app, area),
+        SidebarPanel::Files => render_files(frame, app, area),
+    }
 }
 
 fn render_outline(frame: &mut Frame, app: &App, area: Rect) {
@@ -106,7 +113,7 @@ fn render_outline(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     "· "
                 };
-                let style = if index == app.outline_selected && app.focus == Focus::Outline {
+                let style = if index == app.outline_selected && app.focus == Focus::Sidebar {
                     Style::default()
                         .fg(theme.text)
                         .bg(theme.surface_active)
@@ -122,7 +129,8 @@ fn render_outline(frame: &mut Frame, app: &App, area: Rect) {
             .collect()
     };
 
-    let border_style = if app.focus == Focus::Outline {
+    let border_style = if app.focus == Focus::Sidebar && app.sidebar_panel == SidebarPanel::Outline
+    {
         Style::default().fg(theme.accent)
     } else {
         Style::default().fg(theme.border)
@@ -131,11 +139,79 @@ fn render_outline(frame: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().bg(theme.surface))
         .block(
             TuiBlock::default()
-                .title(Span::styled(" OUTLINE ", theme.muted()))
+                .title(Line::from(vec![
+                    Span::styled(" OUTLINE ", sidebar_tab_style(app, SidebarPanel::Outline)),
+                    Span::styled(" FILES ", sidebar_tab_style(app, SidebarPanel::Files)),
+                ]))
                 .borders(Borders::ALL)
                 .border_style(border_style),
         );
     frame.render_widget(list, area);
+}
+
+fn render_files(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme;
+    let items: Vec<ListItem> = if app.workspace.files.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  No files",
+            theme.muted(),
+        )))]
+    } else {
+        app.workspace
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let marker = if index == app.file_selected {
+                    "◆ "
+                } else if index == app.workspace.selected {
+                    "● "
+                } else {
+                    "· "
+                };
+                let style = if index == app.file_selected && app.focus == Focus::Sidebar {
+                    Style::default()
+                        .fg(theme.text)
+                        .bg(theme.surface_active)
+                        .add_modifier(Modifier::BOLD)
+                } else if index == app.workspace.selected {
+                    Style::default().fg(theme.accent)
+                } else {
+                    Style::default().fg(theme.text_muted)
+                };
+                ListItem::new(Line::from(Span::styled(
+                    format!("{marker}{}", app.workspace.display_path(path)),
+                    style,
+                )))
+            })
+            .collect()
+    };
+
+    let border_style = if app.focus == Focus::Sidebar && app.sidebar_panel == SidebarPanel::Files {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.border)
+    };
+    let list = List::new(items)
+        .style(Style::default().bg(theme.surface))
+        .block(
+            TuiBlock::default()
+                .title(Line::from(vec![
+                    Span::styled(" OUTLINE ", sidebar_tab_style(app, SidebarPanel::Outline)),
+                    Span::styled(" FILES ", sidebar_tab_style(app, SidebarPanel::Files)),
+                ]))
+                .borders(Borders::ALL)
+                .border_style(border_style),
+        );
+    frame.render_widget(list, area);
+}
+
+fn sidebar_tab_style(app: &App, panel: SidebarPanel) -> Style {
+    if app.sidebar_panel == panel {
+        app.theme.accent()
+    } else {
+        app.theme.muted()
+    }
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
@@ -196,6 +272,8 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from(" g / G         top / bottom"),
         Line::from(" Ctrl-u/d       page up / down"),
         Line::from(" t              toggle outline"),
+        Line::from(" 1 / 2          outline / files panel"),
+        Line::from(" Enter          open selected item"),
         Line::from(" /              search rendered text"),
         Line::from(" n / N          next / previous match"),
         Line::from(" q / Esc        quit"),
