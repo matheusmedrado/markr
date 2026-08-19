@@ -22,6 +22,7 @@ The current version can:
 - render headings, paragraphs, emphasis, links, lists, task lists, quotes, code blocks, tables and thematic breaks;
 - reload the active document when it changes on disk;
 - switch between documents without leaving the workspace;
+- search the rendered document and move between matches;
 - use familiar arrow-key controls alongside a small set of vim-inspired shortcuts;
 - preserve the terminal emulator's native text selection and copying.
 
@@ -55,6 +56,9 @@ When a directory is provided, MarkR recursively discovers files with the `.md`, 
 | `g` / `G` | Go to the top / bottom |
 | `Ctrl-u` / `Ctrl-d` | Page up / down |
 | `t` | Toggle the outline sidebar |
+| `/` | Search the rendered document |
+| `Enter` / `Esc` while searching | Confirm / cancel the search |
+| `n` / `N` | Next / previous search match |
 | `?` | Open the quick guide |
 | `q` / `Esc` | Quit |
 
@@ -94,7 +98,7 @@ layout and styled terminal lines
 ratatui view
 ```
 
-This separation gives the project room to grow into search, themes, editing, richer workspace navigation and integrations without turning the event loop into a cupboard full of mystery wires.
+This separation gives the project room to grow into themes, editing, richer workspace navigation and integrations without turning the event loop into a cupboard full of mystery wires.
 
 ## Roadmap
 
@@ -102,7 +106,6 @@ The short-term roadmap includes:
 
 - improve wrapping and viewport-aware outline jumps;
 - add syntax highlighting for fenced code;
-- add document search;
 - add mouse-aware selection and clipboard support;
 - add configurable themes and terminal hyperlinks;
 - support images and more Markdown extensions where the terminal allows it;
