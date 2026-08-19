@@ -3,6 +3,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::markdown::{Block, Document, Inline, InlineStyle};
+use crate::syntax;
 use crate::theme::Theme;
 
 #[derive(Debug)]
@@ -73,11 +74,11 @@ pub fn build(document: &Document, width: u16, theme: Theme) -> DocumentLayout {
                     format!("  ┌─ {label}"),
                     Style::default().fg(theme.code),
                 )));
-                for code_line in code.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled("  │ ", Style::default().fg(theme.code)),
-                        Span::styled(code_line.to_string(), Style::default().fg(theme.text)),
-                    ]));
+                for highlighted_line in syntax::highlight(language.as_deref(), code, theme) {
+                    let mut code_spans =
+                        vec![Span::styled("  │ ", Style::default().fg(theme.code))];
+                    code_spans.extend(highlighted_line);
+                    lines.push(Line::from(code_spans));
                 }
                 lines.push(Line::from(Span::styled(
                     "  └─",
