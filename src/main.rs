@@ -2,6 +2,7 @@ mod app;
 mod event;
 mod layout;
 mod markdown;
+mod syntax;
 mod theme;
 mod view;
 mod workspace;
