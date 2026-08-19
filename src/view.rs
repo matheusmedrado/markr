@@ -3,8 +3,10 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block as TuiBlock, Borders, Clear, List, ListItem, Paragraph};
+use ratatui_image::Image as TerminalImage;
 
 use crate::app::{App, Focus, SidebarPanel};
+use crate::images::Asset;
 use crate::layout;
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -75,16 +77,29 @@ fn render_body(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(theme.border))
         .padding(ratatui::widgets::Padding::horizontal(2));
-    let document_layout = layout::build(
-        &app.document,
-        document_block.inner(document_area).width,
-        theme,
-    );
+    let inner = document_block.inner(document_area);
+    let document_layout = layout::build(&app.document, inner.width, theme, &app.images);
     let paragraph = Paragraph::new(Text::from(document_layout.lines))
         .style(Style::default().fg(theme.text).bg(theme.background))
         .block(document_block)
         .scroll((app.scroll.min(u16::MAX as usize) as u16, 0));
     frame.render_widget(paragraph, document_area);
+
+    let content_width = usize::from(inner.width).min(layout::MAX_CONTENT_WIDTH);
+    for region in &document_layout.image_regions {
+        let Some(Asset::Ready {
+            protocol,
+            cols,
+            rows,
+        }) = app.images.asset(&region.src)
+        else {
+            continue;
+        };
+        if let Some(rect) = image_rect(inner, content_width, region.line, app.scroll, *cols, *rows)
+        {
+            frame.render_widget(TerminalImage::new(protocol), rect);
+        }
+    }
 }
 
 fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
@@ -310,4 +325,54 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+fn image_rect(
+    inner: Rect,
+    content_width: usize,
+    image_line: usize,
+    scroll: usize,
+    image_width: u16,
+    image_height: u16,
+) -> Option<Rect> {
+    let viewport_start = scroll;
+    let viewport_end = scroll.saturating_add(usize::from(inner.height));
+    let image_end = image_line.saturating_add(usize::from(image_height));
+    let visible_start = image_line.max(viewport_start);
+    let visible_end = image_end.min(viewport_end);
+    if visible_start >= visible_end {
+        return None;
+    }
+
+    let content_width = content_width.min(usize::from(inner.width)) as u16;
+    let width = image_width.min(content_width);
+    let content_x = inner.x + (inner.width.saturating_sub(content_width)) / 2;
+    let x = content_x + (content_width.saturating_sub(width)) / 2;
+    let y = inner.y + visible_start.saturating_sub(scroll) as u16;
+    Some(Rect::new(x, y, width, (visible_end - visible_start) as u16))
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::layout::Rect;
+
+    use super::image_rect;
+
+    #[test]
+    fn centers_images_inside_the_content_column() {
+        let rect = image_rect(Rect::new(10, 5, 100, 20), 88, 4, 0, 40, 10).unwrap();
+
+        assert_eq!(rect.x, 40);
+        assert_eq!(rect.y, 9);
+        assert_eq!(rect.width, 40);
+        assert_eq!(rect.height, 10);
+    }
+
+    #[test]
+    fn keeps_partially_visible_images_on_screen_after_scroll() {
+        let rect = image_rect(Rect::new(10, 5, 100, 20), 88, 4, 8, 40, 10).unwrap();
+
+        assert_eq!(rect.y, 5);
+        assert_eq!(rect.height, 6);
+    }
 }
