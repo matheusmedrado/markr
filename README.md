@@ -19,6 +19,7 @@ The current version can:
 - open a Markdown file, a directory of Markdown files or piped stdin;
 - discover Markdown files recursively inside a workspace;
 - show a navigable outline in a dedicated sidebar;
+- browse Markdown files from the same sidebar and open them without leaving the workspace;
 - render headings, paragraphs, emphasis, links, lists, task lists, quotes, code blocks, tables and thematic breaks;
 - reload the active document when it changes on disk;
 - switch between documents without leaving the workspace;
@@ -56,6 +57,8 @@ When a directory is provided, MarkR recursively discovers files with the `.md`, 
 | `g` / `G` | Go to the top / bottom |
 | `Ctrl-u` / `Ctrl-d` | Page up / down |
 | `t` | Toggle the outline sidebar |
+| `1` / `2` | Switch between outline and files |
+| `Enter` while browsing files | Open the selected Markdown file |
 | `/` | Search the rendered document |
 | `Enter` / `Esc` while searching | Confirm / cancel the search |
 | `n` / `N` | Next / previous search match |
