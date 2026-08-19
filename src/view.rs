@@ -9,7 +9,7 @@ use crate::app::{App, Focus, SidebarPanel};
 use crate::images::Asset;
 use crate::layout;
 
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let theme = app.theme;
     frame.render_widget(
         TuiBlock::default().style(Style::default().bg(theme.background)),
@@ -54,7 +54,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(title), area);
 }
 
-fn render_body(frame: &mut Frame, app: &App, area: Rect) {
+fn render_body(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme;
     let chunks = if app.sidebar_visible {
         Layout::default()
@@ -78,26 +78,32 @@ fn render_body(frame: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(theme.border))
         .padding(ratatui::widgets::Padding::horizontal(2));
     let inner = document_block.inner(document_area);
-    let document_layout = layout::build(&app.document, inner.width, theme, &app.images);
-    let paragraph = Paragraph::new(Text::from(document_layout.lines))
+    let start = app.scroll.min(app.document_layout.lines.len());
+    let end = start.saturating_add(usize::from(inner.height));
+    let visible_lines =
+        app.document_layout.lines[start..end.min(app.document_layout.lines.len())].to_vec();
+    let paragraph = Paragraph::new(Text::from(visible_lines))
         .style(Style::default().fg(theme.text).bg(theme.background))
-        .block(document_block)
-        .scroll((app.scroll.min(u16::MAX as usize) as u16, 0));
+        .block(document_block);
     frame.render_widget(paragraph, document_area);
 
     let content_width = usize::from(inner.width).min(layout::MAX_CONTENT_WIDTH);
-    for region in &document_layout.image_regions {
-        let Some(Asset::Ready { cols, rows, .. }) = app.images.asset(&region.src) else {
+    let image_regions: Vec<(String, usize)> = app
+        .document_layout
+        .image_regions
+        .iter()
+        .map(|region| (region.src.clone(), region.line))
+        .collect();
+    for (src, line) in image_regions {
+        let Some(Asset::Ready { cols, rows, .. }) = app.images.asset(&src) else {
             continue;
         };
         if let Some((rect, skipped_rows)) =
-            image_rect(inner, content_width, region.line, app.scroll, *cols, *rows)
+            image_rect(inner, content_width, line, app.scroll, *cols, *rows)
         {
-            let Some(asset) = app.images.asset(&region.src) else {
-                continue;
-            };
             let Some(protocol) =
-                crate::images::ImageStore::protocol_for_scroll(asset, skipped_rows)
+                app.images
+                    .protocol_for_scroll(&src, skipped_rows, usize::from(rect.height))
             else {
                 continue;
             };
@@ -361,9 +367,16 @@ fn image_rect(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
+    use ratatui_image::picker::{Picker, ProtocolType};
 
     use super::image_rect;
+    use crate::app::{App, Message};
+    use crate::workspace::Workspace;
 
     #[test]
     fn centers_images_inside_the_content_column() {
@@ -385,5 +398,45 @@ mod tests {
         assert_eq!(rect.y, 5);
         assert_eq!(rect.height, 6);
         assert_eq!(skipped_rows, 4);
+    }
+
+    #[test]
+    fn renders_every_document_position_without_panicking() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        let mut app = App::new(workspace, Picker::halfblocks()).expect("app");
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+
+        for scroll in 0..=app.document_layout.lines.len() {
+            app.scroll = scroll;
+            terminal
+                .draw(|frame| super::render(frame, &mut app))
+                .expect("render position");
+        }
+    }
+
+    #[test]
+    fn renders_clipped_images_with_the_iterm_protocol() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Iterm2);
+        let mut app = App::new(workspace, picker).expect("app");
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+
+        for scroll in 0..=app.document_layout.lines.len() {
+            app.scroll = scroll;
+            terminal
+                .draw(|frame| super::render(frame, &mut app))
+                .expect("render clipped image");
+        }
     }
 }
