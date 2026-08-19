@@ -64,7 +64,7 @@ When a directory is provided, MarkR recursively discovers files with the `.md`, 
 | `Enter` / `Esc` while searching | Confirm / cancel the search |
 | `n` / `N` | Next / previous search match |
 | `?` | Open the quick guide |
-| `q` / `Esc` | Quit |
+| `q` | Quit |
 
 The controls are intentionally small. MarkR may borrow a few ideas from modal editors, but it does not require a pilgrimage through a 900-page manual before the first scroll.
 
