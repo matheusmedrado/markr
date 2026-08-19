@@ -100,18 +100,43 @@ impl App {
             .saturating_sub(5)
     }
 
+    fn document_height(&self) -> usize {
+        usize::from(self.terminal_height.saturating_sub(3).max(1))
+    }
+
+    fn max_scroll(&self) -> usize {
+        let document_layout = layout::build(
+            &self.document,
+            self.document_width(),
+            self.theme,
+            &self.images,
+        );
+        document_layout
+            .lines
+            .len()
+            .saturating_sub(self.document_height())
+    }
+
+    fn clamp_scroll(&mut self) {
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+
     pub fn sidebar_width(&self) -> u16 {
         33
     }
 
     pub fn update(&mut self, message: Message) {
         match message {
-            Message::Key(key) => self.handle_key(key),
+            Message::Key(key) => {
+                self.handle_key(key);
+                self.clamp_scroll();
+            }
             Message::Tick => self.reload_if_changed(),
             Message::Resize { width, height } => {
                 self.terminal_width = width;
                 self.terminal_height = height;
                 self.refresh_search();
+                self.clamp_scroll();
             }
         }
     }
@@ -358,6 +383,7 @@ impl App {
                 let dir = document_dir(&self.workspace);
                 self.images.load(dir.as_deref(), &self.document);
                 self.clear_search();
+                self.clamp_scroll();
             }
             Err(error) => self.error = Some(error.to_string()),
         }

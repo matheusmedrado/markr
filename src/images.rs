@@ -14,6 +14,7 @@ const MAX_IMAGE_ROWS: u16 = 18;
 pub enum Asset {
     Ready {
         protocol: Protocol,
+        scrolled_protocols: Vec<Protocol>,
         cols: u16,
         rows: u16,
     },
@@ -83,19 +84,47 @@ impl ImageStore {
         };
 
         let (cols, rows) = self.cell_size(decoded.width(), decoded.height());
-        match self
+        let area = Rect::new(0, 0, cols, rows);
+        let Ok(protocol) = self
             .picker
-            .new_protocol(decoded, Rect::new(0, 0, cols, rows), Resize::Fit(None))
-        {
-            Ok(protocol) => {
-                let area = protocol.area();
-                Asset::Ready {
-                    protocol,
-                    cols: area.width,
-                    rows: area.height,
-                }
-            }
-            Err(_) => Asset::Missing,
+            .new_protocol(decoded.clone(), area, Resize::Fit(None))
+        else {
+            return Asset::Missing;
+        };
+
+        let scrolled_protocols = (1..rows)
+            .filter_map(|skip_rows| {
+                let crop = crop_rows(&decoded, skip_rows, rows);
+                let area = Rect::new(0, 0, cols, rows - skip_rows);
+                self.picker.new_protocol(crop, area, Resize::Fit(None)).ok()
+            })
+            .collect();
+
+        Asset::Ready {
+            protocol,
+            scrolled_protocols,
+            cols,
+            rows,
+        }
+    }
+
+    pub fn protocol_for_scroll(asset: &Asset, skipped_rows: usize) -> Option<&Protocol> {
+        let Asset::Ready {
+            protocol,
+            scrolled_protocols,
+            rows,
+            ..
+        } = asset
+        else {
+            return None;
+        };
+
+        if skipped_rows == 0 {
+            Some(protocol)
+        } else if skipped_rows < usize::from(*rows) {
+            scrolled_protocols.get(skipped_rows - 1)
+        } else {
+            None
         }
     }
 
@@ -133,6 +162,16 @@ fn resolve_path(document_dir: Option<&Path>, src: &str) -> Option<PathBuf> {
         return Some(path.to_path_buf());
     }
     Some(document_dir?.join(path))
+}
+
+fn crop_rows(
+    image: &image::DynamicImage,
+    skipped_rows: u16,
+    total_rows: u16,
+) -> image::DynamicImage {
+    let height = image.height();
+    let start = height.saturating_mul(u32::from(skipped_rows)) / u32::from(total_rows);
+    image.crop_imm(0, start, image.width(), height.saturating_sub(start).max(1))
 }
 
 #[cfg(test)]
