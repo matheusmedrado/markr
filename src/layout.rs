@@ -366,6 +366,13 @@ fn inline_style(style: InlineStyle, link: bool, base: Style, theme: Theme) -> St
     if style.code {
         result = result.fg(theme.code).bg(theme.surface_active);
     }
+    if let Some(checked) = style.task {
+        result = if checked {
+            result.fg(theme.accent).add_modifier(Modifier::BOLD)
+        } else {
+            result.fg(theme.text_muted)
+        };
+    }
     if link {
         result = result.fg(theme.link).add_modifier(Modifier::UNDERLINED);
     }
