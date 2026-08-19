@@ -19,12 +19,12 @@ The current version can:
 - open a Markdown file, a directory of Markdown files or piped stdin;
 - discover Markdown files recursively inside a workspace;
 - show a navigable outline in a dedicated sidebar;
-- browse Markdown files from the same sidebar and open them without leaving the workspace;
+- navigate the filesystem from the sidebar, enter and leave directories and open Markdown files from anywhere the process can read;
 - render headings, paragraphs, emphasis, links, lists, task lists, quotes, code blocks, tables and thematic breaks;
 - render local Markdown and HTML images with terminal-aware sizing;
 - reload the active document when it changes on disk;
 - switch between documents without leaving the workspace;
-- search the rendered document and move between matches;
+- search the rendered document with visible highlights for every match and a distinct active result;
 - use familiar arrow-key controls alongside a small set of vim-inspired shortcuts;
 - preserve the terminal emulator's native text selection and copying.
 
@@ -51,18 +51,20 @@ When a directory is provided, MarkR recursively discovers files with the `.md`, 
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓`, `j` / `k` | Navigate the document or outline |
-| `Tab` | Switch focus between outline and document |
+| `↑` / `↓`, `j` / `k` | Navigate the document or active sidebar panel |
+| `Tab` | Switch focus between the active sidebar panel and document |
 | `Enter` | Jump to the selected outline entry |
 | `[` / `]` | Previous / next Markdown file |
 | `g` / `G` | Go to the top / bottom |
 | `Ctrl-u` / `Ctrl-d` | Page up / down |
 | `t` | Toggle the outline sidebar |
 | `1` / `2` | Switch between outline and files |
-| `Enter` while browsing files | Open the selected Markdown file |
+| `Enter`, `l` or `→` in Files | Enter a directory or open the selected Markdown file |
+| `h` or `←` in Files | Go to the parent directory |
+| `r` in Files | Refresh the current directory |
 | `/` | Search the rendered document |
 | `Enter` / `Esc` while searching | Confirm / cancel the search |
-| `n` / `N` | Next / previous search match |
+| `n` / `N` | Next / previous highlighted search match |
 | `?` | Open the quick guide |
 | `q` | Quit |
 
