@@ -31,17 +31,24 @@ pub fn highlight(language: Option<&str>, code: &str, theme: MarkrTheme) -> Vec<V
                         .map(|(style, text)| {
                             Span::styled(
                                 text.trim_end_matches(['\r', '\n']).to_string(),
-                                Style::default().fg(Color::Rgb(
-                                    style.foreground.r,
-                                    style.foreground.g,
-                                    style.foreground.b,
-                                )),
+                                Style::default()
+                                    .fg(Color::Rgb(
+                                        style.foreground.r,
+                                        style.foreground.g,
+                                        style.foreground.b,
+                                    ))
+                                    .bg(theme.surface),
                             )
                         })
                         .filter(|span| !span.content.is_empty())
                         .collect()
                 })
-                .unwrap_or_else(|_| vec![Span::styled(line.to_string(), theme.muted())])
+                .unwrap_or_else(|_| {
+                    vec![Span::styled(
+                        line.to_string(),
+                        theme.muted().bg(theme.surface),
+                    )]
+                })
         })
         .collect()
 }

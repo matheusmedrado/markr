@@ -8,6 +8,7 @@ pub struct Theme {
     pub text: Color,
     pub text_muted: Color,
     pub accent: Color,
+    pub link: Color,
     pub border: Color,
     pub code: Color,
 }
@@ -21,6 +22,7 @@ impl Default for Theme {
             text: Color::Rgb(232, 232, 232),
             text_muted: Color::Rgb(137, 137, 143),
             accent: Color::Rgb(232, 55, 64),
+            link: Color::Rgb(107, 174, 255),
             border: Color::Rgb(53, 53, 59),
             code: Color::Rgb(219, 180, 108),
         }
