@@ -140,8 +140,30 @@ fn render_outline(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme;
-    let left = if let Some(error) = &app.error {
+    let left = if let Some(input) = &app.search_input {
+        Line::from(vec![
+            Span::styled("  /", theme.accent()),
+            Span::styled(input, theme.text),
+            Span::styled("  Enter search  Esc cancel", theme.muted()),
+        ])
+    } else if let Some(error) = &app.error {
         Line::from(Span::styled(format!("  {error}"), theme.accent()))
+    } else if let Some((current, total)) = app.search_result_position() {
+        Line::from(vec![
+            Span::styled(format!("  /{}", app.search_query), theme.accent()),
+            Span::styled(format!("  {current}/{total}  "), theme.muted()),
+            Span::styled("n", theme.accent()),
+            Span::styled(" next  ", theme.muted()),
+            Span::styled("N", theme.accent()),
+            Span::styled(" previous", theme.muted()),
+        ])
+    } else if !app.search_query.is_empty() {
+        Line::from(vec![
+            Span::styled(format!("  /{}", app.search_query), theme.accent()),
+            Span::styled("  no matches  ", theme.muted()),
+            Span::styled("/", theme.accent()),
+            Span::styled(" edit", theme.muted()),
+        ])
     } else {
         Line::from(vec![
             Span::styled("  ", theme.muted()),
@@ -174,6 +196,8 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from(" g / G         top / bottom"),
         Line::from(" Ctrl-u/d       page up / down"),
         Line::from(" t              toggle outline"),
+        Line::from(" /              search rendered text"),
+        Line::from(" n / N          next / previous match"),
         Line::from(" q / Esc        quit"),
         Line::default(),
         Line::from(Span::styled(" Press any key to return ", theme.muted())),

@@ -35,6 +35,10 @@ pub struct App {
     pub terminal_width: u16,
     pub terminal_height: u16,
     pub error: Option<String>,
+    pub search_query: String,
+    pub search_input: Option<String>,
+    search_matches: Vec<usize>,
+    search_selected: usize,
     last_modified: Option<SystemTime>,
     quit: bool,
 }
@@ -55,6 +59,10 @@ impl App {
             terminal_width: 120,
             terminal_height: 40,
             error: None,
+            search_query: String::new(),
+            search_input: None,
+            search_matches: Vec::new(),
+            search_selected: 0,
             last_modified,
             quit: false,
         })
@@ -78,6 +86,7 @@ impl App {
             Message::Resize { width, height } => {
                 self.terminal_width = width;
                 self.terminal_height = height;
+                self.refresh_search();
             }
         }
     }
@@ -98,9 +107,17 @@ impl App {
             return;
         }
 
+        if self.search_input.is_some() {
+            self.handle_search_input(key);
+            return;
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.help_visible = true,
+            KeyCode::Char('/') => self.search_input = Some(self.search_query.clone()),
+            KeyCode::Char('n') => self.next_search_match(),
+            KeyCode::Char('N') => self.previous_search_match(),
             KeyCode::Char('t') => self.sidebar_visible = !self.sidebar_visible,
             KeyCode::Tab => self.focus = toggle_focus(self.focus),
             KeyCode::Char(']') => self.switch_file(true),
@@ -115,6 +132,79 @@ impl App {
             KeyCode::Char('G') => self.scroll = usize::MAX,
             KeyCode::Enter if self.focus == Focus::Outline => self.jump_to_selected_heading(),
             _ => {}
+        }
+    }
+
+    fn handle_search_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.search_input = None,
+            KeyCode::Enter => self.confirm_search(),
+            KeyCode::Backspace => {
+                if let Some(input) = self.search_input.as_mut() {
+                    input.pop();
+                }
+            }
+            KeyCode::Char(character) => {
+                if let Some(input) = self.search_input.as_mut() {
+                    input.push(character);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn confirm_search(&mut self) {
+        self.search_query = self.search_input.take().unwrap_or_default();
+        self.refresh_search();
+        self.search_selected = 0;
+        if let Some(line) = self.search_matches.first() {
+            self.scroll = *line;
+            self.focus = Focus::Document;
+        }
+    }
+
+    fn refresh_search(&mut self) {
+        if self.search_query.is_empty() {
+            self.search_matches.clear();
+            self.search_selected = 0;
+            return;
+        }
+
+        let document_layout = layout::build(&self.document, self.document_width(), self.theme);
+        self.search_matches = find_matches(&document_layout.lines, &self.search_query);
+        if self.search_matches.is_empty() {
+            self.search_selected = 0;
+        } else {
+            self.search_selected = self.search_selected.min(self.search_matches.len() - 1);
+        }
+    }
+
+    fn next_search_match(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        self.search_selected = (self.search_selected + 1) % self.search_matches.len();
+        self.scroll = self.search_matches[self.search_selected];
+        self.focus = Focus::Document;
+    }
+
+    fn previous_search_match(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        self.search_selected = self
+            .search_selected
+            .checked_sub(1)
+            .unwrap_or(self.search_matches.len() - 1);
+        self.scroll = self.search_matches[self.search_selected];
+        self.focus = Focus::Document;
+    }
+
+    pub fn search_result_position(&self) -> Option<(usize, usize)> {
+        if self.search_matches.is_empty() {
+            None
+        } else {
+            Some((self.search_selected + 1, self.search_matches.len()))
         }
     }
 
@@ -168,6 +258,7 @@ impl App {
         }
         self.outline_selected = 0;
         self.scroll = 0;
+        self.clear_search();
         self.load_active_file();
     }
 
@@ -187,10 +278,36 @@ impl App {
                     .min(self.document.outline.len().saturating_sub(1));
                 self.last_modified = modified_time(self.workspace.active_path());
                 self.error = None;
+                self.clear_search();
             }
             Err(error) => self.error = Some(error.to_string()),
         }
     }
+
+    fn clear_search(&mut self) {
+        self.search_query.clear();
+        self.search_input = None;
+        self.search_matches.clear();
+        self.search_selected = 0;
+    }
+}
+
+fn find_matches(lines: &[ratatui::text::Line<'static>], query: &str) -> Vec<usize> {
+    let query = query.to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(line_index, line)| {
+            line.to_string()
+                .to_lowercase()
+                .contains(&query)
+                .then_some(line_index)
+        })
+        .collect()
 }
 
 fn toggle_focus(focus: Focus) -> Focus {
@@ -202,4 +319,29 @@ fn toggle_focus(focus: Focus) -> Focus {
 
 fn modified_time(path: Option<&Path>) -> Option<SystemTime> {
     path.and_then(|path| fs::metadata(path).ok()?.modified().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::text::Line;
+
+    use super::find_matches;
+
+    #[test]
+    fn finds_case_insensitive_matches_in_rendered_lines() {
+        let lines = vec![
+            Line::from("A calm document"),
+            Line::from("Nothing here"),
+            Line::from("A CALM ending"),
+        ];
+
+        assert_eq!(find_matches(&lines, "calm"), vec![0, 2]);
+    }
+
+    #[test]
+    fn ignores_empty_search_queries() {
+        let lines = vec![Line::from("A calm document")];
+
+        assert!(find_matches(&lines, "").is_empty());
+    }
 }
