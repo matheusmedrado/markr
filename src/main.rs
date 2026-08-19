@@ -1,5 +1,6 @@
 mod app;
 mod event;
+mod explorer;
 mod images;
 mod layout;
 mod markdown;
