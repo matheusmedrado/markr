@@ -68,15 +68,17 @@ impl Workspace {
 
     pub fn display_name(&self) -> String {
         self.active_path()
-            .map(|path| {
-                self.root
-                    .as_deref()
-                    .and_then(|root| path.strip_prefix(root).ok())
-                    .unwrap_or(path)
-                    .display()
-                    .to_string()
-            })
+            .map(|path| self.display_path(path))
             .unwrap_or_else(|| "stdin".to_string())
+    }
+
+    pub fn display_path(&self, path: &Path) -> String {
+        self.root
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok())
+            .unwrap_or(path)
+            .display()
+            .to_string()
     }
 
     pub fn reload_content(&self) -> io::Result<String> {
@@ -114,13 +116,28 @@ fn is_markdown(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_markdown;
-    use std::path::Path;
+    use super::{Workspace, is_markdown};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn recognizes_markdown_extensions() {
         assert!(is_markdown(Path::new("guide.md")));
         assert!(is_markdown(Path::new("guide.MARKDOWN")));
         assert!(!is_markdown(Path::new("guide.txt")));
+    }
+
+    #[test]
+    fn displays_paths_relative_to_the_workspace_root() {
+        let workspace = Workspace {
+            root: Some(PathBuf::from("/workspace")),
+            files: Vec::new(),
+            selected: 0,
+            stdin_content: None,
+        };
+
+        assert_eq!(
+            workspace.display_path(Path::new("/workspace/guides/start.md")),
+            "guides/start.md"
+        );
     }
 }
