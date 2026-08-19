@@ -2,10 +2,10 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block as TuiBlock, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block as TuiBlock, Borders, Clear, List, ListItem, Paragraph};
 
 use crate::app::{App, Focus};
-use crate::markdown::{Block, Inline, InlineStyle};
+use crate::layout;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let theme = app.theme;
@@ -71,17 +71,19 @@ fn render_body(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let document_area = chunks[chunks.len() - 1];
-    let document_lines = render_document(app, document_area.width.saturating_sub(4));
-    let paragraph = Paragraph::new(Text::from(document_lines))
+    let document_block = TuiBlock::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(theme.border))
+        .padding(ratatui::widgets::Padding::horizontal(2));
+    let document_layout = layout::build(
+        &app.document,
+        document_block.inner(document_area).width,
+        theme,
+    );
+    let paragraph = Paragraph::new(Text::from(document_layout.lines))
         .style(Style::default().fg(theme.text).bg(theme.background))
-        .block(
-            TuiBlock::default()
-                .borders(Borders::LEFT)
-                .border_style(Style::default().fg(theme.border))
-                .padding(ratatui::widgets::Padding::horizontal(2)),
-        )
-        .scroll((app.scroll.min(u16::MAX as usize) as u16, 0))
-        .wrap(Wrap { trim: false });
+        .block(document_block)
+        .scroll((app.scroll.min(u16::MAX as usize) as u16, 0));
     frame.render_widget(paragraph, document_area);
 }
 
@@ -157,167 +159,6 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     spans.push(right);
     let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line).alignment(Alignment::Right), area);
-}
-
-fn render_document(app: &App, width: u16) -> Vec<Line<'static>> {
-    let theme = app.theme;
-    let mut lines = Vec::new();
-    for block in &app.document.blocks {
-        match block {
-            Block::Heading { level, content } => {
-                lines.push(Line::default());
-                let marker = format!("{} ", "#".repeat(*level as usize));
-                lines.extend(inlines_to_lines(
-                    content,
-                    Some(marker),
-                    heading_style(*level, theme),
-                ));
-            }
-            Block::Paragraph {
-                content,
-                quote_depth,
-            } => {
-                let prefix = if *quote_depth > 0 {
-                    Some("│ ".to_string())
-                } else {
-                    None
-                };
-                lines.extend(inlines_to_lines(
-                    content,
-                    prefix,
-                    Style::default().fg(theme.text),
-                ));
-            }
-            Block::List { ordered, items } => {
-                for (index, item) in items.iter().enumerate() {
-                    let marker = ordered
-                        .map(|start| format!("{}.", start + index as u64))
-                        .unwrap_or_else(|| "•".to_string());
-                    lines.extend(inlines_to_lines(
-                        item,
-                        Some(format!("{marker} ")),
-                        Style::default().fg(theme.text),
-                    ));
-                }
-            }
-            Block::FencedCode { language, code } => {
-                let label = language.as_deref().unwrap_or("code");
-                lines.push(Line::from(Span::styled(
-                    format!("  ┌─ {label}"),
-                    Style::default().fg(theme.code),
-                )));
-                for code_line in code.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled("  │ ", Style::default().fg(theme.code)),
-                        Span::styled(code_line.to_string(), Style::default().fg(theme.text)),
-                    ]));
-                }
-                lines.push(Line::from(Span::styled(
-                    "  └─",
-                    Style::default().fg(theme.code),
-                )));
-            }
-            Block::Table { headers, rows } => {
-                let header = headers
-                    .iter()
-                    .map(|cell| crate::markdown::inline_text(cell))
-                    .collect::<Vec<_>>()
-                    .join("  │  ");
-                if !header.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!("│ {header} │"),
-                        theme.title(),
-                    )));
-                    lines.push(Line::from(Span::styled(
-                        "├──────────────────────────────┤",
-                        theme.muted(),
-                    )));
-                }
-                for row in rows {
-                    let content = row
-                        .iter()
-                        .map(|cell| crate::markdown::inline_text(cell))
-                        .collect::<Vec<_>>()
-                        .join("  │  ");
-                    lines.push(Line::from(Span::styled(
-                        format!("│ {content} │"),
-                        Style::default().fg(theme.text),
-                    )));
-                }
-            }
-            Block::ThematicBreak => lines.push(Line::from(Span::styled(
-                "  ─────────────────────────────",
-                theme.border,
-            ))),
-            Block::Html(html) => lines.push(Line::from(Span::styled(html.clone(), theme.muted()))),
-        }
-        lines.push(Line::default());
-    }
-    let _ = width;
-    lines
-}
-
-fn inlines_to_lines(
-    content: &[Inline],
-    prefix: Option<String>,
-    base_style: Style,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(
-        prefix.clone().map(Span::raw).unwrap_or_default(),
-    )];
-    for inline in content {
-        let style = inline_style(inline.style, inline.link.is_some(), base_style);
-        let parts: Vec<&str> = inline.text.split('\n').collect();
-        for (index, part) in parts.iter().enumerate() {
-            if !part.is_empty() {
-                lines
-                    .last_mut()
-                    .expect("at least one line")
-                    .spans
-                    .push(Span::styled((*part).to_string(), style));
-            }
-            if index + 1 < parts.len() {
-                lines.push(Line::from(
-                    prefix.clone().map(Span::raw).unwrap_or_default(),
-                ));
-            }
-        }
-    }
-    lines
-}
-
-fn inline_style(style: InlineStyle, link: bool, base: Style) -> Style {
-    let mut result = base;
-    if style.emphasis {
-        result = result.add_modifier(Modifier::ITALIC);
-    }
-    if style.strong {
-        result = result.add_modifier(Modifier::BOLD);
-    }
-    if style.strike {
-        result = result.add_modifier(Modifier::CROSSED_OUT);
-    }
-    if style.code {
-        result = result.fg(ratatui::style::Color::Rgb(219, 180, 108));
-    }
-    if link {
-        result = result
-            .fg(ratatui::style::Color::Rgb(107, 174, 255))
-            .add_modifier(Modifier::UNDERLINED);
-    }
-    result
-}
-
-fn heading_style(level: u8, theme: crate::theme::Theme) -> Style {
-    match level {
-        1 => Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-        2 => Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-        _ => Style::default()
-            .fg(theme.text_muted)
-            .add_modifier(Modifier::BOLD),
-    }
 }
 
 fn render_help(frame: &mut Frame, app: &App) {
