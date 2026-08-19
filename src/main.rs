@@ -1,5 +1,6 @@
 mod app;
 mod event;
+mod images;
 mod layout;
 mod markdown;
 mod syntax;
@@ -19,6 +20,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui_image::picker::Picker;
 
 use crate::app::{App, Message};
 use crate::event::map_event;
@@ -37,16 +39,22 @@ struct Cli {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let workspace = Workspace::open(cli.path, io::stdin().is_terminal())?;
-    let mut app = App::new(workspace)?;
+    let stdin_is_terminal = io::stdin().is_terminal();
+    let workspace = Workspace::open(cli.path, stdin_is_terminal)?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    let picker = if stdin_is_terminal {
+        Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
+    } else {
+        Picker::halfblocks()
+    };
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
     let size = terminal.size()?;
+    let mut app = App::new(workspace, picker)?;
     app.update(Message::Resize {
         width: size.width,
         height: size.height,

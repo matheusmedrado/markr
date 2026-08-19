@@ -36,7 +36,10 @@ pub enum Block {
         rows: Vec<Vec<Vec<Inline>>>,
     },
     ThematicBreak,
-    Html(String),
+    Image {
+        src: String,
+        alt: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +68,7 @@ impl Document {
         let mut link = None;
         let mut link_stack = Vec::new();
         let mut table_context = TableContext::default();
+        let mut images: Vec<ImageWork> = Vec::new();
 
         let mut options = Options::all();
         options.insert(Options::ENABLE_TASKLISTS);
@@ -124,6 +128,13 @@ impl Document {
                         link_stack.push(link.take());
                         link = Some(destination.into_string());
                     }
+                    Tag::Image(_, destination, _) => {
+                        images.push(ImageWork {
+                            src: destination.into_string(),
+                            marker: current_content_len(&current),
+                            alt: String::new(),
+                        });
+                    }
                     Tag::Table(_) => {
                         table_context = TableContext::default();
                         current = Some(WorkingBlock::Table {
@@ -152,6 +163,24 @@ impl Document {
                         }
                     }
                     Tag::Link(..) => link = link_stack.pop().flatten(),
+                    Tag::Image(..) => {
+                        if let Some(work) = images.pop() {
+                            let replaces_current = matches!(
+                                &current,
+                                Some(WorkingBlock::Paragraph { content, .. })
+                                    if content.len() == work.marker
+                            );
+                            if replaces_current {
+                                current = None;
+                            } else {
+                                finish_current(&mut current, &mut blocks);
+                            }
+                            blocks.push(Block::Image {
+                                src: work.src,
+                                alt: work.alt,
+                            });
+                        }
+                    }
                     Tag::TableHead => {
                         table_context.in_head = false;
                         if let Some(WorkingBlock::Table { headers, .. }) = current.as_mut() {
@@ -175,38 +204,50 @@ impl Document {
                     }
                     _ => {}
                 },
-                Event::Text(text) => append_text(
-                    &mut current,
-                    text.as_ref(),
-                    style,
-                    link.clone(),
-                    &mut table_context,
-                ),
-                Event::Code(text) => append_text(
-                    &mut current,
-                    text.as_ref(),
-                    InlineStyle {
-                        code: true,
-                        ..InlineStyle::default()
-                    },
-                    link.clone(),
-                    &mut table_context,
-                ),
-                Event::Html(html) => {
-                    if current.is_none() {
-                        blocks.push(Block::Html(html.into_string()));
+                Event::Text(text) => {
+                    if let Some(work) = images.last_mut() {
+                        work.alt.push_str(text.as_ref());
                     } else {
                         append_text(
                             &mut current,
-                            html.as_ref(),
+                            text.as_ref(),
                             style,
                             link.clone(),
                             &mut table_context,
                         );
                     }
                 }
+                Event::Code(text) => {
+                    if let Some(work) = images.last_mut() {
+                        work.alt.push_str(text.as_ref());
+                    } else {
+                        append_text(
+                            &mut current,
+                            text.as_ref(),
+                            InlineStyle {
+                                code: true,
+                                ..InlineStyle::default()
+                            },
+                            link.clone(),
+                            &mut table_context,
+                        );
+                    }
+                }
+                Event::Html(html) => {
+                    let img_tags = extract_img_tags(html.as_ref());
+                    if !img_tags.is_empty() {
+                        finish_current(&mut current, &mut blocks);
+                        for (src, alt) in img_tags {
+                            blocks.push(Block::Image { src, alt });
+                        }
+                    }
+                }
                 Event::SoftBreak | Event::HardBreak => {
-                    append_text(&mut current, "\n", style, link.clone(), &mut table_context);
+                    if let Some(work) = images.last_mut() {
+                        work.alt.push(' ');
+                    } else {
+                        append_text(&mut current, "\n", style, link.clone(), &mut table_context);
+                    }
                 }
                 Event::Rule => blocks.push(Block::ThematicBreak),
                 Event::TaskListMarker(checked) => append_text(
@@ -276,6 +317,84 @@ struct TableContext {
     in_head: bool,
     current_row: Vec<Vec<Inline>>,
     current_cell: Vec<Inline>,
+}
+
+struct ImageWork {
+    src: String,
+    marker: usize,
+    alt: String,
+}
+
+fn current_content_len(current: &Option<WorkingBlock>) -> usize {
+    match current {
+        Some(WorkingBlock::Paragraph { content, .. })
+        | Some(WorkingBlock::Heading { content, .. }) => content.len(),
+        _ => usize::MAX,
+    }
+}
+
+fn extract_img_tags(html: &str) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    let lower = html.to_ascii_lowercase();
+    let mut search_from = 0;
+    while let Some(offset) = lower[search_from..].find("<img") {
+        let start = search_from + offset;
+        let Some(tag_end) = html[start..].find('>').map(|end| start + end) else {
+            break;
+        };
+        let tag = &html[start + 4..tag_end];
+        let is_tag_boundary = tag
+            .as_bytes()
+            .first()
+            .is_none_or(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>'));
+        if is_tag_boundary {
+            let src = html_attribute(tag, "src").unwrap_or_default();
+            let alt = html_attribute(tag, "alt").unwrap_or_default();
+            if !src.is_empty() {
+                results.push((src, alt));
+            }
+        }
+        search_from = tag_end + 1;
+    }
+    results
+}
+
+fn html_attribute(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let mut search_from = 0;
+    while let Some(offset) = lower[search_from..].find(name) {
+        let start = search_from + offset;
+        let end = start + name.len();
+        let boundary_ok = start == 0
+            || tag[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace);
+        search_from = end;
+        if !boundary_ok {
+            continue;
+        }
+        let rest = tag[end..].trim_start();
+        let Some(value) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let value = value.trim_start();
+        return match value.as_bytes().first() {
+            Some(b'"') | Some(b'\'') => {
+                let quote = value.as_bytes()[0] as char;
+                let inner = &value[1..];
+                inner.find(quote).map(|stop| inner[..stop].to_string())
+            }
+            _ => Some(
+                value
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+        };
+    }
+    None
 }
 
 fn finish_current(current: &mut Option<WorkingBlock>, blocks: &mut Vec<Block>) {
@@ -406,5 +525,32 @@ mod tests {
         assert_eq!(items[0][0].text, "☑ ");
         assert_eq!(items[0][0].style.task, Some(true));
         assert_eq!(items[1][0].style.task, Some(false));
+    }
+
+    #[test]
+    fn parses_markdown_images_as_image_blocks() {
+        let document = Document::parse("Before\n\n![MarkR logo](assets/markr-logo.png)\n\nAfter");
+
+        assert!(matches!(document.blocks[0], Block::Paragraph { .. }));
+        let Block::Image { src, alt } = &document.blocks[1] else {
+            panic!("expected image block");
+        };
+        assert_eq!(src, "assets/markr-logo.png");
+        assert_eq!(alt, "MarkR logo");
+        assert!(matches!(document.blocks[2], Block::Paragraph { .. }));
+    }
+
+    #[test]
+    fn extracts_images_from_html_blocks_and_skips_wrapper_tags() {
+        let document = Document::parse(
+            "<p align=\"center\">\n  <img src=\"assets/logo.png\" alt=\"Logo\" width=\"360\">\n</p>",
+        );
+
+        assert_eq!(document.blocks.len(), 1);
+        let Block::Image { src, alt } = &document.blocks[0] else {
+            panic!("expected image block");
+        };
+        assert_eq!(src, "assets/logo.png");
+        assert_eq!(alt, "Logo");
     }
 }

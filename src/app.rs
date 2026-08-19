@@ -1,9 +1,11 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui_image::picker::Picker;
 
+use crate::images::ImageStore;
 use crate::layout;
 use crate::markdown::Document;
 use crate::theme::Theme;
@@ -33,6 +35,7 @@ pub struct App {
     pub workspace: Workspace,
     pub document: Document,
     pub theme: Theme,
+    pub images: ImageStore,
     pub focus: Focus,
     pub sidebar_panel: SidebarPanel,
     pub scroll: usize,
@@ -52,13 +55,17 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(workspace: Workspace) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(workspace: Workspace, picker: Picker) -> Result<Self, Box<dyn std::error::Error>> {
         let document = Document::parse(&workspace.reload_content()?);
         let last_modified = modified_time(workspace.active_path());
+        let document_dir = document_dir(&workspace);
+        let mut images = ImageStore::new(picker);
+        images.load(document_dir.as_deref(), &document);
         Ok(Self {
             workspace,
             document,
             theme: Theme::default(),
+            images,
             focus: Focus::Document,
             sidebar_panel: SidebarPanel::Outline,
             scroll: 0,
@@ -190,7 +197,12 @@ impl App {
             return;
         }
 
-        let document_layout = layout::build(&self.document, self.document_width(), self.theme);
+        let document_layout = layout::build(
+            &self.document,
+            self.document_width(),
+            self.theme,
+            &self.images,
+        );
         self.search_matches = find_matches(&document_layout.lines, &self.search_query);
         if self.search_matches.is_empty() {
             self.search_selected = 0;
@@ -272,7 +284,12 @@ impl App {
 
     fn jump_to_selected_heading(&mut self) {
         if self.document.outline.get(self.outline_selected).is_some() {
-            let document_layout = layout::build(&self.document, self.document_width(), self.theme);
+            let document_layout = layout::build(
+                &self.document,
+                self.document_width(),
+                self.theme,
+                &self.images,
+            );
             if let Some(line) = document_layout.heading_line(self.outline_selected) {
                 self.scroll = line;
             }
@@ -338,6 +355,8 @@ impl App {
                 self.file_selected = self.workspace.selected;
                 self.last_modified = modified_time(self.workspace.active_path());
                 self.error = None;
+                let dir = document_dir(&self.workspace);
+                self.images.load(dir.as_deref(), &self.document);
                 self.clear_search();
             }
             Err(error) => self.error = Some(error.to_string()),
@@ -350,6 +369,13 @@ impl App {
         self.search_matches.clear();
         self.search_selected = 0;
     }
+}
+
+fn document_dir(workspace: &Workspace) -> Option<PathBuf> {
+    workspace
+        .active_path()
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf)
 }
 
 fn find_matches(lines: &[ratatui::text::Line<'static>], query: &str) -> Vec<usize> {
