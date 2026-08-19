@@ -1,6 +1,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::markdown::{Block, Document, Inline, InlineStyle};
 use crate::syntax;
@@ -78,7 +79,7 @@ pub fn build(document: &Document, width: u16, theme: Theme) -> DocumentLayout {
                         .map(|start| format!("{}.", start + index as u64))
                         .unwrap_or_else(|| "•".to_string());
                     let prefix = format!("{marker} ");
-                    let continuation = " ".repeat(UnicodeWidthStr::width(prefix.as_str()));
+                    let continuation = " ".repeat(text_width(prefix.as_str()));
                     push_wrapped_inlines(
                         item,
                         Some(prefix),
@@ -173,7 +174,7 @@ struct LineBuilder {
 
 impl LineBuilder {
     fn new(prefix: Option<String>, continuation_prefix: Option<String>, max_width: usize) -> Self {
-        let prefix_width = prefix.as_deref().map(UnicodeWidthStr::width).unwrap_or(0);
+        let prefix_width = prefix.as_deref().map(text_width).unwrap_or(0);
         let mut builder = Self {
             prefix,
             continuation_prefix,
@@ -189,25 +190,25 @@ impl LineBuilder {
 
     fn push_text(&mut self, text: &str, style: Style, lines: &mut Vec<Line<'static>>) {
         let mut chunk = String::new();
-        for character in text.chars() {
-            if character == '\n' {
+        for grapheme in text.graphemes(true) {
+            if grapheme == "\n" {
                 self.flush(&mut chunk, style);
                 self.finish(lines);
                 continue;
             }
 
-            let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-            let would_overflow = self.width + character_width > self.max_width;
+            let grapheme_width = text_width(grapheme);
+            let would_overflow = self.width + grapheme_width > self.max_width;
             if would_overflow && self.width > self.prefix_width {
                 self.flush(&mut chunk, style);
                 self.finish(lines);
-                if character.is_whitespace() {
+                if grapheme.chars().all(char::is_whitespace) {
                     continue;
                 }
             }
 
-            chunk.push(character);
-            self.width += character_width;
+            chunk.push_str(grapheme);
+            self.width += grapheme_width;
         }
         self.flush(&mut chunk, style);
     }
@@ -231,7 +232,7 @@ impl LineBuilder {
             self.prefix.as_ref()
         };
         self.prefix_width = prefix
-            .map(|prefix| UnicodeWidthStr::width(prefix.as_str()))
+            .map(|prefix| text_width(prefix.as_str()))
             .unwrap_or(0);
         self.width = self.prefix_width;
         self.spans = prefix
@@ -289,7 +290,7 @@ fn table_column_widths(rows: &[Vec<String>], max_width: usize) -> Vec<usize> {
         .map(|column| {
             rows.iter()
                 .filter_map(|row| row.get(column))
-                .map(|cell| UnicodeWidthStr::width(cell.as_str()))
+                .map(|cell| text_width(cell.as_str()))
                 .max()
                 .unwrap_or(1)
                 .max(1)
@@ -319,8 +320,7 @@ fn table_row(cells: &[String], widths: &[usize], style: Style) -> Line<'static> 
         let cell = truncate_width(cell, *width);
         content.push(' ');
         content.push_str(&cell);
-        content
-            .push_str(&" ".repeat(width.saturating_sub(UnicodeWidthStr::width(cell.as_str())) + 1));
+        content.push_str(&" ".repeat(width.saturating_sub(text_width(cell.as_str())) + 1));
         content.push('│');
     }
     Line::from(Span::styled(content, style))
@@ -341,15 +341,19 @@ fn table_separator(widths: &[usize], style: Style) -> Line<'static> {
 fn truncate_width(text: &str, max_width: usize) -> String {
     let mut result = String::new();
     let mut width = 0;
-    for character in text.chars() {
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if width + character_width > max_width {
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = text_width(grapheme);
+        if width + grapheme_width > max_width {
             break;
         }
-        result.push(character);
-        width += character_width;
+        result.push_str(grapheme);
+        width += grapheme_width;
     }
     result
+}
+
+fn text_width(text: &str) -> usize {
+    text.graphemes(true).map(UnicodeWidthStr::width).sum()
 }
 
 fn inline_style(style: InlineStyle, link: bool, base: Style, theme: Theme) -> Style {
@@ -393,7 +397,7 @@ fn heading_style(level: u8, theme: Theme) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::build;
+    use super::{build, text_width};
     use crate::markdown::Document;
     use crate::theme::Theme;
 
@@ -459,5 +463,14 @@ mod tests {
                 .iter()
                 .any(|line| line.to_string().starts_with("├") && line.to_string().contains('┼'))
         );
+    }
+
+    #[test]
+    fn keeps_unicode_graphemes_together_when_wrapping() {
+        let layout = build(&Document::parse("👩‍💻 ready"), 2, Theme::default());
+
+        assert_eq!(text_width("e\u{301}"), 1);
+        assert_eq!(text_width("👩‍💻"), 2);
+        assert_eq!(layout.lines[0].to_string(), "👩‍💻");
     }
 }
