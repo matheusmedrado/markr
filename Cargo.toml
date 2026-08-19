@@ -12,6 +12,7 @@ pulldown-cmark = "0.9"
 ratatui = "0.29"
 syntect = "5.2"
 unicode-width = "0.2"
+unicode-segmentation = "1.12"
 
 [dev-dependencies]
 pretty_assertions = "1.4"
