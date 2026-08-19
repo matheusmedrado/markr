@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use ratatui::layout::Rect;
+use ratatui::layout::Size;
 use ratatui_image::Resize;
 use ratatui_image::picker::Picker;
-use ratatui_image::protocol::Protocol;
+use ratatui_image::sliced::SlicedProtocol;
 
 use crate::layout::MAX_CONTENT_WIDTH;
 use crate::markdown::{Block, Document};
@@ -14,8 +13,7 @@ const MAX_IMAGE_ROWS: u16 = 18;
 
 pub enum Asset {
     Ready {
-        protocol: Protocol,
-        source: Arc<image::DynamicImage>,
+        protocol: SlicedProtocol,
         cols: u16,
         rows: u16,
     },
@@ -38,14 +36,12 @@ impl std::fmt::Debug for Asset {
 pub struct ImageStore {
     picker: Picker,
     assets: HashMap<String, Asset>,
-    scrolled_protocols: HashMap<String, (usize, usize, Protocol)>,
 }
 
 impl std::fmt::Debug for ImageStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImageStore")
             .field("assets", &self.assets)
-            .field("scrolled_protocols", &self.scrolled_protocols.keys())
             .finish()
     }
 }
@@ -55,13 +51,11 @@ impl ImageStore {
         Self {
             picker,
             assets: HashMap::new(),
-            scrolled_protocols: HashMap::new(),
         }
     }
 
     pub fn load(&mut self, document_dir: Option<&Path>, document: &Document) {
         self.assets.clear();
-        self.scrolled_protocols.clear();
         for block in &document.blocks {
             if let Block::Image { src, .. } = block
                 && !self.assets.contains_key(src)
@@ -88,85 +82,26 @@ impl ImageStore {
             return Asset::Missing;
         };
 
-        let source = Arc::new(decoded);
-        let (cols, rows) = self.cell_size(source.width(), source.height());
-        let area = Rect::new(0, 0, cols, rows);
+        let (cols, rows) = self.cell_size(decoded.width(), decoded.height());
+        let size = Size::new(cols, rows);
         let Ok(protocol) =
-            self.picker
-                .new_protocol(source.as_ref().clone(), area, Resize::Fit(None))
+            SlicedProtocol::new_with_resize(&self.picker, decoded, size, Resize::Fit(None))
         else {
             return Asset::Missing;
         };
+        let size = protocol.size();
 
         Asset::Ready {
             protocol,
-            source,
-            cols,
-            rows,
+            cols: size.width,
+            rows: size.height,
         }
-    }
-
-    pub fn protocol_for_scroll(
-        &mut self,
-        src: &str,
-        skipped_rows: usize,
-        visible_rows: usize,
-    ) -> Option<&Protocol> {
-        if skipped_rows == 0 {
-            let Asset::Ready { protocol, .. } = self.assets.get(src)? else {
-                return None;
-            };
-            let Asset::Ready { rows, .. } = self.assets.get(src)? else {
-                return None;
-            };
-            if visible_rows >= usize::from(*rows) {
-                return Some(protocol);
-            }
-        }
-
-        let (source, cols, rows) = match self.assets.get(src)? {
-            Asset::Ready {
-                source, cols, rows, ..
-            } => (Arc::clone(source), *cols, *rows),
-            Asset::Missing => return None,
-        };
-        if skipped_rows >= usize::from(rows) || visible_rows == 0 {
-            return None;
-        }
-
-        let visible_rows = visible_rows.min(usize::from(rows) - skipped_rows);
-
-        let needs_refresh =
-            self.scrolled_protocols
-                .get(src)
-                .is_none_or(|(cached_skip, cached_rows, _)| {
-                    *cached_skip != skipped_rows || *cached_rows != visible_rows
-                });
-        if needs_refresh {
-            let crop = crop_rows(
-                source.as_ref(),
-                skipped_rows as u16,
-                rows,
-                visible_rows as u16,
-            );
-            let area = Rect::new(0, 0, cols, visible_rows as u16);
-            let protocol = self
-                .picker
-                .new_protocol(crop, area, Resize::Fit(None))
-                .ok()?;
-            self.scrolled_protocols
-                .insert(src.to_string(), (skipped_rows, visible_rows, protocol));
-        }
-
-        self.scrolled_protocols
-            .get(src)
-            .map(|(_, _, protocol)| protocol)
     }
 
     fn cell_size(&self, width_px: u32, height_px: u32) -> (u16, u16) {
-        let (font_width, font_height) = self.picker.font_size();
-        let font_width = u32::from(font_width.max(1));
-        let font_height = u32::from(font_height.max(1));
+        let font_size = self.picker.font_size();
+        let font_width = u32::from(font_size.width.max(1));
+        let font_height = u32::from(font_size.height.max(1));
         let natural_cols = width_px.div_ceil(font_width);
         let natural_rows = height_px.div_ceil(font_height);
         let scale = f64::min(
@@ -199,23 +134,15 @@ fn resolve_path(document_dir: Option<&Path>, src: &str) -> Option<PathBuf> {
     Some(document_dir?.join(path))
 }
 
-fn crop_rows(
-    image: &image::DynamicImage,
-    skipped_rows: u16,
-    total_rows: u16,
-    visible_rows: u16,
-) -> image::DynamicImage {
-    let height = image.height();
-    let start = height.saturating_mul(u32::from(skipped_rows)) / u32::from(total_rows);
-    let end_rows = skipped_rows.saturating_add(visible_rows).min(total_rows);
-    let end = height.saturating_mul(u32::from(end_rows)) / u32::from(total_rows);
-    image.crop_imm(0, start, image.width(), end.saturating_sub(start).max(1))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ImageStore, resolve_path};
     use std::path::{Path, PathBuf};
+
+    use ratatui_image::picker::{Picker, ProtocolType};
+    use ratatui_image::sliced::SlicedProtocol;
+
+    use super::{Asset, ImageStore, resolve_path};
+    use crate::markdown::Document;
 
     #[test]
     fn resolves_relative_sources_against_the_document_directory() {
@@ -252,5 +179,20 @@ mod tests {
         assert!(cols <= 88);
         assert!(rows <= 18);
         assert!(cols >= 1 && rows >= 1);
+    }
+
+    #[test]
+    fn creates_a_single_sliced_kitty_protocol() {
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let mut store = ImageStore::new(picker);
+        let document = Document::parse("![logo](assets/markr-logo.png)");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        store.load(Some(root), &document);
+
+        let Some(Asset::Ready { protocol, .. }) = store.asset("assets/markr-logo.png") else {
+            panic!("sliced image protocol");
+        };
+        assert!(matches!(protocol, SlicedProtocol::Kitty(_)));
     }
 }

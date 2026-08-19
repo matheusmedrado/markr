@@ -55,6 +55,23 @@ pub struct App {
     quit: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct UiSnapshot {
+    focus: Focus,
+    sidebar_panel: SidebarPanel,
+    scroll: usize,
+    outline_selected: usize,
+    file_selected: usize,
+    workspace_selected: usize,
+    sidebar_visible: bool,
+    help_visible: bool,
+    error: Option<String>,
+    search_query: String,
+    search_input: Option<String>,
+    search_selected: usize,
+    quit: bool,
+}
+
 impl App {
     pub fn new(workspace: Workspace, picker: Picker) -> Result<Self, Box<dyn std::error::Error>> {
         let document = Document::parse(&workspace.reload_content()?);
@@ -134,24 +151,48 @@ impl App {
         33
     }
 
-    pub fn update(&mut self, message: Message) {
+    pub fn update(&mut self, message: Message) -> bool {
         match message {
             Message::Key(key) => {
+                let before = self.ui_snapshot();
                 let previous_width = self.document_width();
                 self.handle_key(key);
                 if self.document_width() != previous_width {
                     self.rebuild_layout();
                 }
                 self.clamp_scroll();
+                before != self.ui_snapshot()
             }
             Message::Tick => self.reload_if_changed(),
             Message::Resize { width, height } => {
+                if self.terminal_width == width && self.terminal_height == height {
+                    return false;
+                }
                 self.terminal_width = width;
                 self.terminal_height = height;
                 self.rebuild_layout();
                 self.refresh_search();
                 self.clamp_scroll();
+                true
             }
+        }
+    }
+
+    fn ui_snapshot(&self) -> UiSnapshot {
+        UiSnapshot {
+            focus: self.focus,
+            sidebar_panel: self.sidebar_panel,
+            scroll: self.scroll,
+            outline_selected: self.outline_selected,
+            file_selected: self.file_selected,
+            workspace_selected: self.workspace.selected,
+            sidebar_visible: self.sidebar_visible,
+            help_visible: self.help_visible,
+            error: self.error.clone(),
+            search_query: self.search_query.clone(),
+            search_input: self.search_input.clone(),
+            search_selected: self.search_selected,
+            quit: self.quit,
         }
     }
 
@@ -177,7 +218,7 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.help_visible = true,
             KeyCode::Char('/') => self.search_input = Some(self.search_query.clone()),
             KeyCode::Char('n') => self.next_search_match(),
@@ -365,10 +406,13 @@ impl App {
         self.load_active_file();
     }
 
-    fn reload_if_changed(&mut self) {
+    fn reload_if_changed(&mut self) -> bool {
         let current_modified = modified_time(self.workspace.active_path());
         if current_modified.is_some() && current_modified != self.last_modified {
             self.load_active_file();
+            true
+        } else {
+            false
         }
     }
 
@@ -438,9 +482,24 @@ fn modified_time(path: Option<&Path>) -> Option<SystemTime> {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::text::Line;
+    use std::path::PathBuf;
 
-    use super::find_matches;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::text::Line;
+    use ratatui_image::picker::Picker;
+
+    use super::{App, Message, find_matches};
+    use crate::workspace::Workspace;
+
+    fn readme_app() -> App {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        App::new(workspace, Picker::halfblocks()).expect("app")
+    }
+
+    fn key(code: KeyCode) -> Message {
+        Message::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
 
     #[test]
     fn finds_case_insensitive_matches_in_rendered_lines() {
@@ -458,5 +517,28 @@ mod tests {
         let lines = vec![Line::from("A calm document")];
 
         assert!(find_matches(&lines, "").is_empty());
+    }
+
+    #[test]
+    fn ignores_scroll_attempts_beyond_document_boundaries() {
+        let mut app = readme_app();
+
+        assert!(!app.update(key(KeyCode::Up)));
+        assert_eq!(app.scroll, 0);
+
+        assert!(app.update(key(KeyCode::Char('G'))));
+        let bottom = app.scroll;
+        assert!(!app.update(key(KeyCode::Down)));
+        assert_eq!(app.scroll, bottom);
+    }
+
+    #[test]
+    fn escape_does_not_quit_the_document_view() {
+        let mut app = readme_app();
+
+        assert!(!app.update(key(KeyCode::Esc)));
+        assert!(!app.should_quit());
+        assert!(app.update(key(KeyCode::Char('q'))));
+        assert!(app.should_quit());
     }
 }

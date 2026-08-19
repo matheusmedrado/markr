@@ -3,13 +3,13 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block as TuiBlock, Borders, Clear, List, ListItem, Paragraph};
-use ratatui_image::Image as TerminalImage;
+use ratatui_image::sliced::{SignedPosition, SlicedImage};
 
 use crate::app::{App, Focus, SidebarPanel};
 use crate::images::Asset;
 use crate::layout;
 
-pub fn render(frame: &mut Frame, app: &mut App) {
+pub fn render(frame: &mut Frame, app: &App) {
     let theme = app.theme;
     frame.render_widget(
         TuiBlock::default().style(Style::default().bg(theme.background)),
@@ -54,7 +54,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(title), area);
 }
 
-fn render_body(frame: &mut Frame, app: &mut App, area: Rect) {
+fn render_body(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme;
     let chunks = if app.sidebar_visible {
         Layout::default()
@@ -98,16 +98,12 @@ fn render_body(frame: &mut Frame, app: &mut App, area: Rect) {
         let Some(Asset::Ready { cols, rows, .. }) = app.images.asset(&src) else {
             continue;
         };
-        if let Some((rect, skipped_rows)) =
-            image_rect(inner, content_width, line, app.scroll, *cols, *rows)
+        if let Some(position) = image_position(inner, content_width, line, app.scroll, *cols, *rows)
         {
-            let Some(protocol) =
-                app.images
-                    .protocol_for_scroll(&src, skipped_rows, usize::from(rect.height))
-            else {
+            let Some(Asset::Ready { protocol, .. }) = app.images.asset(&src) else {
                 continue;
             };
-            frame.render_widget(TerminalImage::new(protocol), rect);
+            frame.render_widget(SlicedImage::new(protocol, position), inner);
         }
     }
 }
@@ -301,7 +297,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from(" Enter          open selected item"),
         Line::from(" /              search rendered text"),
         Line::from(" n / N          next / previous match"),
-        Line::from(" q / Esc        quit"),
+        Line::from(" q              quit"),
         Line::default(),
         Line::from(Span::styled(" Press any key to return ", theme.muted())),
     ]);
@@ -337,32 +333,31 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
-fn image_rect(
+fn image_position(
     inner: Rect,
     content_width: usize,
     image_line: usize,
     scroll: usize,
     image_width: u16,
     image_height: u16,
-) -> Option<(Rect, usize)> {
+) -> Option<SignedPosition> {
     let viewport_start = scroll;
     let viewport_end = scroll.saturating_add(usize::from(inner.height));
     let image_end = image_line.saturating_add(usize::from(image_height));
-    let visible_start = image_line.max(viewport_start);
-    let visible_end = image_end.min(viewport_end);
-    if visible_start >= visible_end {
+    if image_line >= viewport_end || image_end <= viewport_start {
         return None;
     }
 
     let content_width = content_width.min(usize::from(inner.width)) as u16;
     let width = image_width.min(content_width);
-    let content_x = inner.x + (inner.width.saturating_sub(content_width)) / 2;
+    let content_x = (inner.width.saturating_sub(content_width)) / 2;
     let x = content_x + (content_width.saturating_sub(width)) / 2;
-    let y = inner.y + visible_start.saturating_sub(scroll) as u16;
-    Some((
-        Rect::new(x, y, width, (visible_end - visible_start) as u16),
-        visible_start.saturating_sub(image_line),
-    ))
+    let y = if image_line >= scroll {
+        image_line.saturating_sub(scroll).min(i16::MAX as usize) as i16
+    } else {
+        -(scroll.saturating_sub(image_line).min(i16::MAX as usize) as i16)
+    };
+    Some((x.min(i16::MAX as u16) as i16, y).into())
 }
 
 #[cfg(test)]
@@ -374,30 +369,24 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui_image::picker::{Picker, ProtocolType};
 
-    use super::image_rect;
+    use super::image_position;
     use crate::app::{App, Message};
+    use crate::images::Asset;
     use crate::workspace::Workspace;
 
     #[test]
     fn centers_images_inside_the_content_column() {
-        let rect = image_rect(Rect::new(10, 5, 100, 20), 88, 4, 0, 40, 10).unwrap();
+        let position = image_position(Rect::new(10, 5, 100, 20), 88, 4, 0, 40, 10).unwrap();
 
-        let (rect, skipped_rows) = rect;
-        assert_eq!(rect.x, 40);
-        assert_eq!(rect.y, 9);
-        assert_eq!(rect.width, 40);
-        assert_eq!(rect.height, 10);
-        assert_eq!(skipped_rows, 0);
+        assert_eq!(position.x, 30);
+        assert_eq!(position.y, 4);
     }
 
     #[test]
     fn keeps_partially_visible_images_on_screen_after_scroll() {
-        let rect = image_rect(Rect::new(10, 5, 100, 20), 88, 4, 8, 40, 10).unwrap();
+        let position = image_position(Rect::new(10, 5, 100, 20), 88, 4, 8, 40, 10).unwrap();
 
-        let (rect, skipped_rows) = rect;
-        assert_eq!(rect.y, 5);
-        assert_eq!(rect.height, 6);
-        assert_eq!(skipped_rows, 4);
+        assert_eq!(position.y, -4);
     }
 
     #[test]
@@ -414,7 +403,7 @@ mod tests {
         for scroll in 0..=app.document_layout.lines.len() {
             app.scroll = scroll;
             terminal
-                .draw(|frame| super::render(frame, &mut app))
+                .draw(|frame| super::render(frame, &app))
                 .expect("render position");
         }
     }
@@ -435,8 +424,63 @@ mod tests {
         for scroll in 0..=app.document_layout.lines.len() {
             app.scroll = scroll;
             terminal
-                .draw(|frame| super::render(frame, &mut app))
+                .draw(|frame| super::render(frame, &app))
                 .expect("render clipped image");
+        }
+    }
+
+    #[test]
+    fn renders_every_document_position_with_the_kitty_protocol() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let mut app = App::new(workspace, picker).expect("app");
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+
+        for scroll in 0..=app.document_layout.lines.len() {
+            app.scroll = scroll;
+            terminal
+                .draw(|frame| super::render(frame, &app))
+                .expect("render sliced kitty image");
+        }
+    }
+
+    #[test]
+    fn repeatedly_crosses_the_kitty_image_boundary_without_panicking() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let mut app = App::new(workspace, picker).expect("app");
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+        });
+        let region = app
+            .document_layout
+            .image_regions
+            .first()
+            .expect("image region");
+        let Asset::Ready { rows, .. } = app.images.asset(&region.src).expect("loaded image asset")
+        else {
+            panic!("loaded image");
+        };
+        let image_end = region.line + usize::from(*rows);
+        let positions = [image_end.saturating_sub(1), image_end];
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+
+        for _ in 0..250 {
+            for scroll in positions {
+                app.scroll = scroll;
+                terminal
+                    .draw(|frame| super::render(frame, &app))
+                    .expect("render image boundary");
+            }
         }
     }
 }
