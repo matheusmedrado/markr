@@ -1,10 +1,12 @@
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_image::picker::Picker;
 
+use crate::explorer::{Activation, FileExplorer};
 use crate::images::ImageStore;
 use crate::layout;
 use crate::markdown::Document;
@@ -30,6 +32,12 @@ pub enum Message {
     Resize { width: u16, height: u16 },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub line: usize,
+    pub range: Range<usize>,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub workspace: Workspace,
@@ -37,11 +45,11 @@ pub struct App {
     pub document_layout: layout::DocumentLayout,
     pub theme: Theme,
     pub images: ImageStore,
+    pub file_explorer: FileExplorer,
     pub focus: Focus,
     pub sidebar_panel: SidebarPanel,
     pub scroll: usize,
     pub outline_selected: usize,
-    pub file_selected: usize,
     pub sidebar_visible: bool,
     pub help_visible: bool,
     pub terminal_width: u16,
@@ -49,7 +57,7 @@ pub struct App {
     pub error: Option<String>,
     pub search_query: String,
     pub search_input: Option<String>,
-    search_matches: Vec<usize>,
+    search_matches: Vec<SearchMatch>,
     search_selected: usize,
     last_modified: Option<SystemTime>,
     quit: bool,
@@ -61,8 +69,10 @@ struct UiSnapshot {
     sidebar_panel: SidebarPanel,
     scroll: usize,
     outline_selected: usize,
-    file_selected: usize,
     workspace_selected: usize,
+    explorer_directory: PathBuf,
+    explorer_selected: usize,
+    explorer_generation: u64,
     sidebar_visible: bool,
     help_visible: bool,
     error: Option<String>,
@@ -74,6 +84,7 @@ struct UiSnapshot {
 
 impl App {
     pub fn new(workspace: Workspace, picker: Picker) -> Result<Self, Box<dyn std::error::Error>> {
+        let file_explorer = FileExplorer::open(workspace.explorer_start_directory()?)?;
         let document = Document::parse(&workspace.reload_content()?);
         let last_modified = modified_time(workspace.active_path());
         let document_dir = document_dir(&workspace);
@@ -89,11 +100,11 @@ impl App {
             document_layout,
             theme,
             images,
+            file_explorer,
             focus: Focus::Document,
             sidebar_panel: SidebarPanel::Outline,
             scroll: 0,
             outline_selected: 0,
-            file_selected: 0,
             sidebar_visible: true,
             help_visible: false,
             terminal_width,
@@ -184,8 +195,10 @@ impl App {
             sidebar_panel: self.sidebar_panel,
             scroll: self.scroll,
             outline_selected: self.outline_selected,
-            file_selected: self.file_selected,
             workspace_selected: self.workspace.selected,
+            explorer_directory: self.file_explorer.directory().to_path_buf(),
+            explorer_selected: self.file_explorer.selected(),
+            explorer_generation: self.file_explorer.generation(),
             sidebar_visible: self.sidebar_visible,
             help_visible: self.help_visible,
             error: self.error.clone(),
@@ -227,6 +240,21 @@ impl App {
             KeyCode::Char('1') => self.select_sidebar_panel(SidebarPanel::Outline),
             KeyCode::Char('2') => self.select_sidebar_panel(SidebarPanel::Files),
             KeyCode::Tab => self.focus = toggle_focus(self.focus),
+            KeyCode::Left | KeyCode::Char('h')
+                if self.focus == Focus::Sidebar && self.sidebar_panel == SidebarPanel::Files =>
+            {
+                self.browse_parent()
+            }
+            KeyCode::Right | KeyCode::Char('l')
+                if self.focus == Focus::Sidebar && self.sidebar_panel == SidebarPanel::Files =>
+            {
+                self.activate_explorer_entry()
+            }
+            KeyCode::Char('r')
+                if self.focus == Focus::Sidebar && self.sidebar_panel == SidebarPanel::Files =>
+            {
+                self.refresh_explorer()
+            }
             KeyCode::Char(']') => self.switch_file(true),
             KeyCode::Char('[') => self.switch_file(false),
             KeyCode::Up | KeyCode::Char('k') => self.move_up(),
@@ -264,8 +292,8 @@ impl App {
         self.search_query = self.search_input.take().unwrap_or_default();
         self.refresh_search();
         self.search_selected = 0;
-        if let Some(line) = self.search_matches.first() {
-            self.scroll = *line;
+        if let Some(search_match) = self.search_matches.first() {
+            self.scroll = search_match.line;
             self.focus = Focus::Document;
         }
     }
@@ -290,7 +318,7 @@ impl App {
             return;
         }
         self.search_selected = (self.search_selected + 1) % self.search_matches.len();
-        self.scroll = self.search_matches[self.search_selected];
+        self.scroll = self.search_matches[self.search_selected].line;
         self.focus = Focus::Document;
     }
 
@@ -302,7 +330,7 @@ impl App {
             .search_selected
             .checked_sub(1)
             .unwrap_or(self.search_matches.len() - 1);
-        self.scroll = self.search_matches[self.search_selected];
+        self.scroll = self.search_matches[self.search_selected].line;
         self.focus = Focus::Document;
     }
 
@@ -314,13 +342,33 @@ impl App {
         }
     }
 
+    pub fn search_matches_on_line(
+        &self,
+        line: usize,
+    ) -> impl Iterator<Item = (usize, &SearchMatch)> {
+        let start = self
+            .search_matches
+            .partition_point(|search_match| search_match.line < line);
+        let end = self
+            .search_matches
+            .partition_point(|search_match| search_match.line <= line);
+        self.search_matches[start..end]
+            .iter()
+            .enumerate()
+            .map(move |(offset, search_match)| (start + offset, search_match))
+    }
+
+    pub fn selected_search_match(&self) -> Option<usize> {
+        (!self.search_matches.is_empty()).then_some(self.search_selected)
+    }
+
     fn move_up(&mut self) {
         match self.focus {
             Focus::Sidebar => match self.sidebar_panel {
                 SidebarPanel::Outline => {
                     self.outline_selected = self.outline_selected.saturating_sub(1)
                 }
-                SidebarPanel::Files => self.file_selected = self.file_selected.saturating_sub(1),
+                SidebarPanel::Files => self.file_explorer.move_up(),
             },
             Focus::Document => self.scroll = self.scroll.saturating_sub(1),
         }
@@ -336,10 +384,7 @@ impl App {
                     }
                 }
                 SidebarPanel::Files => {
-                    if !self.workspace.files.is_empty() {
-                        self.file_selected =
-                            (self.file_selected + 1).min(self.workspace.files.len() - 1);
-                    }
+                    self.file_explorer.move_down();
                 }
             },
             Focus::Document => self.scroll = self.scroll.saturating_add(1),
@@ -374,20 +419,51 @@ impl App {
     fn activate_sidebar_selection(&mut self) {
         match self.sidebar_panel {
             SidebarPanel::Outline => self.jump_to_selected_heading(),
-            SidebarPanel::Files => self.open_selected_file(),
+            SidebarPanel::Files => self.activate_explorer_entry(),
         }
     }
 
-    fn open_selected_file(&mut self) {
-        if self.workspace.files.get(self.file_selected).is_none() {
-            return;
+    fn activate_explorer_entry(&mut self) {
+        match self.file_explorer.activate() {
+            Ok(Activation::Navigated) => self.error = None,
+            Ok(Activation::OpenMarkdown(path)) => self.open_explorer_file(&path),
+            Ok(Activation::Unsupported(path)) => {
+                self.error = Some(format!(
+                    "{} is not a Markdown document",
+                    path.file_name()
+                        .map(|name| name.to_string_lossy())
+                        .unwrap_or_default()
+                ));
+            }
+            Err(error) => self.error = Some(format!("Cannot open directory: {error}")),
         }
-        self.workspace.selected = self.file_selected;
-        self.outline_selected = 0;
-        self.scroll = 0;
-        self.clear_search();
-        self.load_active_file();
-        self.focus = Focus::Document;
+    }
+
+    fn open_explorer_file(&mut self, path: &Path) {
+        match self.workspace.open_file(path) {
+            Ok(()) => {
+                self.outline_selected = 0;
+                self.scroll = 0;
+                self.clear_search();
+                self.load_active_file();
+                self.focus = Focus::Document;
+            }
+            Err(error) => self.error = Some(format!("Cannot open file: {error}")),
+        }
+    }
+
+    fn browse_parent(&mut self) {
+        match self.file_explorer.go_parent() {
+            Ok(_) => self.error = None,
+            Err(error) => self.error = Some(format!("Cannot open directory: {error}")),
+        }
+    }
+
+    fn refresh_explorer(&mut self) {
+        match self.file_explorer.refresh() {
+            Ok(()) => self.error = None,
+            Err(error) => self.error = Some(format!("Cannot refresh directory: {error}")),
+        }
     }
 
     fn switch_file(&mut self, next: bool) {
@@ -399,7 +475,6 @@ impl App {
         } else {
             self.workspace.previous_file();
         }
-        self.file_selected = self.workspace.selected;
         self.outline_selected = 0;
         self.scroll = 0;
         self.clear_search();
@@ -423,7 +498,6 @@ impl App {
                 self.outline_selected = self
                     .outline_selected
                     .min(self.document.outline.len().saturating_sub(1));
-                self.file_selected = self.workspace.selected;
                 self.last_modified = modified_time(self.workspace.active_path());
                 self.error = None;
                 let dir = document_dir(&self.workspace);
@@ -451,8 +525,7 @@ fn document_dir(workspace: &Workspace) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-fn find_matches(lines: &[ratatui::text::Line<'static>], query: &str) -> Vec<usize> {
-    let query = query.to_lowercase();
+fn find_matches(lines: &[ratatui::text::Line<'static>], query: &str) -> Vec<SearchMatch> {
     if query.is_empty() {
         return Vec::new();
     }
@@ -460,11 +533,48 @@ fn find_matches(lines: &[ratatui::text::Line<'static>], query: &str) -> Vec<usiz
     lines
         .iter()
         .enumerate()
-        .filter_map(|(line_index, line)| {
-            line.to_string()
-                .to_lowercase()
-                .contains(&query)
-                .then_some(line_index)
+        .flat_map(|(line_index, line)| {
+            find_case_insensitive_ranges(&line.to_string(), query)
+                .into_iter()
+                .map(move |range| SearchMatch {
+                    line: line_index,
+                    range,
+                })
+        })
+        .collect()
+}
+
+fn find_case_insensitive_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
+    let folded_query = query.to_lowercase();
+    if folded_query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut folded_text = String::new();
+    let mut segments = Vec::new();
+    for (start, character) in text.char_indices() {
+        let original = start..start + character.len_utf8();
+        let folded_start = folded_text.len();
+        folded_text.extend(character.to_lowercase());
+        segments.push((folded_start..folded_text.len(), original));
+    }
+
+    folded_text
+        .match_indices(&folded_query)
+        .filter_map(|(start, matched)| {
+            let end = start + matched.len();
+            let original_start = segments
+                .iter()
+                .find(|(folded, _)| folded.start <= start && start < folded.end)?
+                .1
+                .start;
+            let original_end = segments
+                .iter()
+                .find(|(folded, _)| folded.start < end && end <= folded.end)
+                .or_else(|| segments.iter().rev().find(|(folded, _)| folded.start < end))?
+                .1
+                .end;
+            Some(original_start..original_end)
         })
         .collect()
 }
@@ -488,7 +598,7 @@ mod tests {
     use ratatui::text::Line;
     use ratatui_image::picker::Picker;
 
-    use super::{App, Message, find_matches};
+    use super::{App, Message, SearchMatch, find_matches};
     use crate::workspace::Workspace;
 
     fn readme_app() -> App {
@@ -509,7 +619,61 @@ mod tests {
             Line::from("A CALM ending"),
         ];
 
-        assert_eq!(find_matches(&lines, "calm"), vec![0, 2]);
+        assert_eq!(
+            find_matches(&lines, "calm"),
+            vec![
+                SearchMatch {
+                    line: 0,
+                    range: 2..6,
+                },
+                SearchMatch {
+                    line: 2,
+                    range: 2..6,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn finds_every_occurrence_on_the_same_line() {
+        let lines = vec![Line::from("calm, CALM, calm")];
+
+        assert_eq!(
+            find_matches(&lines, "calm"),
+            vec![
+                SearchMatch {
+                    line: 0,
+                    range: 0..4,
+                },
+                SearchMatch {
+                    line: 0,
+                    range: 6..10,
+                },
+                SearchMatch {
+                    line: 0,
+                    range: 12..16,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_unicode_match_ranges_aligned_with_the_original_text() {
+        let lines = vec![Line::from("CAFÉ e café")];
+
+        assert_eq!(
+            find_matches(&lines, "café"),
+            vec![
+                SearchMatch {
+                    line: 0,
+                    range: 0..5,
+                },
+                SearchMatch {
+                    line: 0,
+                    range: 8..13,
+                },
+            ]
+        );
     }
 
     #[test]

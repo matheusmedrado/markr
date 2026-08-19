@@ -1,11 +1,14 @@
+use std::ops::Range;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block as TuiBlock, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block as TuiBlock, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui_image::sliced::{SignedPosition, SlicedImage};
 
 use crate::app::{App, Focus, SidebarPanel};
+use crate::explorer::EntryKind;
 use crate::images::Asset;
 use crate::layout;
 
@@ -80,8 +83,23 @@ fn render_body(frame: &mut Frame, app: &App, area: Rect) {
     let inner = document_block.inner(document_area);
     let start = app.scroll.min(app.document_layout.lines.len());
     let end = start.saturating_add(usize::from(inner.height));
-    let visible_lines =
-        app.document_layout.lines[start..end.min(app.document_layout.lines.len())].to_vec();
+    let visible_lines = app.document_layout.lines[start..end.min(app.document_layout.lines.len())]
+        .iter()
+        .enumerate()
+        .map(|(offset, line)| {
+            let line_index = start + offset;
+            let highlights = app
+                .search_matches_on_line(line_index)
+                .map(|(index, search_match)| {
+                    (
+                        search_match.range.clone(),
+                        app.selected_search_match() == Some(index),
+                    )
+                })
+                .collect::<Vec<_>>();
+            highlight_search_line(line, &highlights, theme)
+        })
+        .collect::<Vec<_>>();
     let paragraph = Paragraph::new(Text::from(visible_lines))
         .style(Style::default().fg(theme.text).bg(theme.background))
         .block(document_block);
@@ -172,36 +190,34 @@ fn render_outline(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_files(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme;
-    let items: Vec<ListItem> = if app.workspace.files.is_empty() {
+    let items: Vec<ListItem> = if app.file_explorer.entries().is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
-            "  No files",
+            "  Empty directory",
             theme.muted(),
         )))]
     } else {
-        app.workspace
-            .files
+        app.file_explorer
+            .entries()
             .iter()
-            .enumerate()
-            .map(|(index, path)| {
-                let marker = if index == app.file_selected {
-                    "◆ "
-                } else if index == app.workspace.selected {
-                    "● "
-                } else {
-                    "· "
+            .map(|entry| {
+                let active = app.workspace.active_path() == Some(entry.path.as_path());
+                let marker = match entry.kind {
+                    EntryKind::Parent => "↰ ",
+                    EntryKind::Directory => "▸ ",
+                    EntryKind::Markdown if active => "● ",
+                    EntryKind::Markdown => "◇ ",
+                    EntryKind::File => "· ",
                 };
-                let style = if index == app.file_selected && app.focus == Focus::Sidebar {
-                    Style::default()
-                        .fg(theme.text)
-                        .bg(theme.surface_active)
-                        .add_modifier(Modifier::BOLD)
-                } else if index == app.workspace.selected {
+                let suffix = matches!(entry.kind, EntryKind::Directory).then_some("/");
+                let style = if active {
                     Style::default().fg(theme.accent)
+                } else if matches!(entry.kind, EntryKind::File) {
+                    Style::default().fg(theme.border)
                 } else {
                     Style::default().fg(theme.text_muted)
                 };
                 ListItem::new(Line::from(Span::styled(
-                    format!("{marker}{}", app.workspace.display_path(path)),
+                    format!("{marker}{}{}", entry.name, suffix.unwrap_or_default()),
                     style,
                 )))
             })
@@ -213,18 +229,106 @@ fn render_files(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         Style::default().fg(theme.border)
     };
+    let block = TuiBlock::default()
+        .title(Line::from(vec![
+            Span::styled(" OUTLINE ", sidebar_tab_style(app, SidebarPanel::Outline)),
+            Span::styled(" FILES ", sidebar_tab_style(app, SidebarPanel::Files)),
+        ]))
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .style(Style::default().bg(theme.surface));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(inner);
+    let directory = Text::from(vec![
+        Line::from(Span::styled(
+            format!(" {}", app.file_explorer.directory().display()),
+            theme.title(),
+        )),
+        Line::from(Span::styled(
+            " h parent · l open · r refresh",
+            theme.muted(),
+        )),
+    ]);
+    frame.render_widget(Paragraph::new(directory), chunks[0]);
+
+    let highlight_style = if app.focus == Focus::Sidebar {
+        Style::default()
+            .fg(theme.text)
+            .bg(theme.surface_active)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
     let list = List::new(items)
         .style(Style::default().bg(theme.surface))
-        .block(
-            TuiBlock::default()
-                .title(Line::from(vec![
-                    Span::styled(" OUTLINE ", sidebar_tab_style(app, SidebarPanel::Outline)),
-                    Span::styled(" FILES ", sidebar_tab_style(app, SidebarPanel::Files)),
-                ]))
-                .borders(Borders::ALL)
-                .border_style(border_style),
-        );
-    frame.render_widget(list, area);
+        .highlight_style(highlight_style);
+    let mut state = ListState::default().with_selected(
+        (!app.file_explorer.entries().is_empty()).then_some(app.file_explorer.selected()),
+    );
+    frame.render_stateful_widget(list, chunks[1], &mut state);
+}
+
+fn highlight_search_line(
+    line: &Line<'static>,
+    highlights: &[(Range<usize>, bool)],
+    theme: crate::theme::Theme,
+) -> Line<'static> {
+    if highlights.is_empty() {
+        return line.clone();
+    }
+
+    let mut spans = Vec::new();
+    let mut line_offset = 0;
+    for span in &line.spans {
+        let content = span.content.as_ref();
+        let span_start = line_offset;
+        let span_end = span_start + content.len();
+        let mut boundaries = vec![span_start, span_end];
+        for (range, _) in highlights {
+            if range.start < span_end && span_start < range.end {
+                boundaries.push(range.start.max(span_start));
+                boundaries.push(range.end.min(span_end));
+            }
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        for segment in boundaries.windows(2) {
+            let start = segment[0];
+            let end = segment[1];
+            if start == end {
+                continue;
+            }
+            let mut style = span.style;
+            if let Some((_, active)) = highlights
+                .iter()
+                .find(|(range, _)| range.start <= start && end <= range.end)
+            {
+                let highlight = if *active {
+                    Style::default()
+                        .fg(theme.background)
+                        .bg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .bg(theme.surface_active)
+                        .add_modifier(Modifier::UNDERLINED)
+                };
+                style = style.patch(highlight);
+            }
+            spans.push(Span::styled(
+                content[start - span_start..end - span_start].to_string(),
+                style,
+            ));
+        }
+        line_offset = span_end;
+    }
+    Line::from(spans)
 }
 
 fn sidebar_tab_style(app: &App, panel: SidebarPanel) -> Style {
@@ -261,6 +365,15 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("/", theme.accent()),
             Span::styled(" edit", theme.muted()),
         ])
+    } else if app.focus == Focus::Sidebar && app.sidebar_panel == SidebarPanel::Files {
+        Line::from(vec![
+            Span::styled("  h/←", theme.accent()),
+            Span::styled(" parent  ", theme.muted()),
+            Span::styled("l/→/Enter", theme.accent()),
+            Span::styled(" open  ", theme.muted()),
+            Span::styled("r", theme.accent()),
+            Span::styled(" refresh", theme.muted()),
+        ])
     } else {
         Line::from(vec![
             Span::styled("  ", theme.muted()),
@@ -286,15 +399,17 @@ fn render_help(frame: &mut Frame, app: &App) {
     let text = Text::from(vec![
         Line::from(Span::styled(" MARKR / QUICK GUIDE ", theme.accent())),
         Line::default(),
-        Line::from(" ↑↓ / j k     navigate document or outline"),
-        Line::from(" Tab           switch focus"),
+        Line::from(" ↑↓ / j k     navigate document or sidebar"),
+        Line::from(" Tab           switch sidebar/document focus"),
         Line::from(" Enter         open outline section"),
         Line::from(" [ / ]         previous / next document"),
         Line::from(" g / G         top / bottom"),
         Line::from(" Ctrl-u/d       page up / down"),
         Line::from(" t              toggle outline"),
         Line::from(" 1 / 2          outline / files panel"),
-        Line::from(" Enter          open selected item"),
+        Line::from(" Enter / l / →  open file or directory"),
+        Line::from(" h / ←          explorer parent directory"),
+        Line::from(" r              refresh explorer"),
         Line::from(" /              search rendered text"),
         Line::from(" n / N          next / previous match"),
         Line::from(" q              quit"),
@@ -367,11 +482,14 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
     use ratatui_image::picker::{Picker, ProtocolType};
 
-    use super::image_position;
+    use super::{highlight_search_line, image_position};
     use crate::app::{App, Message};
     use crate::images::Asset;
+    use crate::theme::Theme;
     use crate::workspace::Workspace;
 
     #[test]
@@ -387,6 +505,35 @@ mod tests {
         let position = image_position(Rect::new(10, 5, 100, 20), 88, 4, 8, 40, 10).unwrap();
 
         assert_eq!(position.y, -4);
+    }
+
+    #[test]
+    fn highlights_all_matches_and_emphasizes_the_selected_one() {
+        let theme = Theme::default();
+        let line = Line::from(vec![
+            Span::styled("Mark", Style::default().fg(theme.link)),
+            Span::styled("R reader", Style::default().fg(theme.text)),
+        ]);
+
+        let highlighted = highlight_search_line(&line, &[(0..5, false), (6..12, true)], theme);
+        let markr = highlighted
+            .spans
+            .iter()
+            .filter(|span| matches!(span.content.as_ref(), "Mark" | "R"))
+            .collect::<Vec<_>>();
+        let reader = highlighted
+            .spans
+            .iter()
+            .find(|span| span.content == "reader")
+            .expect("selected match");
+
+        assert!(markr.iter().all(|span| {
+            span.style.bg == Some(theme.surface_active)
+                && span.style.add_modifier.contains(Modifier::UNDERLINED)
+        }));
+        assert_eq!(reader.style.bg, Some(theme.accent));
+        assert_eq!(reader.style.fg, Some(theme.background));
+        assert!(reader.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
