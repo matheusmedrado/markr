@@ -52,6 +52,7 @@ pub struct InlineStyle {
     pub strong: bool,
     pub strike: bool,
     pub code: bool,
+    pub task: Option<bool>,
 }
 
 impl Document {
@@ -210,8 +211,11 @@ impl Document {
                 Event::Rule => blocks.push(Block::ThematicBreak),
                 Event::TaskListMarker(checked) => append_text(
                     &mut current,
-                    if checked { "[x] " } else { "[ ] " },
-                    style,
+                    if checked { "☑ " } else { "☐ " },
+                    InlineStyle {
+                        task: Some(checked),
+                        ..style
+                    },
                     link.clone(),
                     &mut table_context,
                 ),
@@ -390,5 +394,17 @@ mod tests {
         assert_eq!(headers.len(), 2);
         assert_eq!(rows.len(), 1);
         assert_eq!(super::inline_text(&headers[0]), "Name");
+    }
+
+    #[test]
+    fn preserves_task_state_in_list_items() {
+        let document = Document::parse("- [x] Done\n- [ ] Next");
+        let Block::List { items, .. } = &document.blocks[0] else {
+            panic!("expected list block");
+        };
+
+        assert_eq!(items[0][0].text, "☑ ");
+        assert_eq!(items[0][0].style.task, Some(true));
+        assert_eq!(items[1][0].style.task, Some(false));
     }
 }
