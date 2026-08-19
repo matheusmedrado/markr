@@ -1,5 +1,6 @@
 mod app;
 mod event;
+mod layout;
 mod markdown;
 mod theme;
 mod view;
@@ -44,6 +45,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
+    let size = terminal.size()?;
+    app.update(Message::Resize {
+        width: size.width,
+        height: size.height,
+    });
 
     let result = run(&mut terminal, &mut app);
 

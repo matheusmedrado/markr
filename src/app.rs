@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::layout;
 use crate::markdown::Document;
 use crate::theme::Theme;
 use crate::workspace::Workspace;
@@ -61,6 +62,13 @@ impl App {
 
     pub fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    pub fn document_width(&self) -> u16 {
+        let sidebar_width = if self.sidebar_visible { 29 } else { 0 };
+        self.terminal_width
+            .saturating_sub(sidebar_width)
+            .saturating_sub(5)
     }
 
     pub fn update(&mut self, message: Message) {
@@ -140,8 +148,11 @@ impl App {
     }
 
     fn jump_to_selected_heading(&mut self) {
-        if let Some(heading) = self.document.outline.get(self.outline_selected) {
-            self.scroll = heading.block_index.saturating_mul(2);
+        if self.document.outline.get(self.outline_selected).is_some() {
+            let document_layout = layout::build(&self.document, self.document_width(), self.theme);
+            if let Some(line) = document_layout.heading_line(self.outline_selected) {
+                self.scroll = line;
+            }
             self.focus = Focus::Document;
         }
     }
@@ -171,6 +182,9 @@ impl App {
         match self.workspace.reload_content() {
             Ok(content) => {
                 self.document = Document::parse(&content);
+                self.outline_selected = self
+                    .outline_selected
+                    .min(self.document.outline.len().saturating_sub(1));
                 self.last_modified = modified_time(self.workspace.active_path());
                 self.error = None;
             }
