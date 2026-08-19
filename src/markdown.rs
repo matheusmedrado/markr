@@ -151,7 +151,12 @@ impl Document {
                         }
                     }
                     Tag::Link(..) => link = link_stack.pop().flatten(),
-                    Tag::TableHead => table_context.in_head = false,
+                    Tag::TableHead => {
+                        table_context.in_head = false;
+                        if let Some(WorkingBlock::Table { headers, .. }) = current.as_mut() {
+                            *headers = std::mem::take(&mut table_context.current_row);
+                        }
+                    }
                     Tag::TableRow => {
                         if let Some(WorkingBlock::Table { headers, rows }) = current.as_mut() {
                             let row = std::mem::take(&mut table_context.current_row);
@@ -373,5 +378,17 @@ mod tests {
         let document = Document::parse("- One\n- Two\n\n```rust\nlet value = 1;\n```");
         assert!(matches!(document.blocks[0], Block::List { .. }));
         assert!(matches!(document.blocks[1], Block::FencedCode { .. }));
+    }
+
+    #[test]
+    fn preserves_table_headers_and_rows() {
+        let document = Document::parse("| Name | Value |\n| --- | --- |\n| MarkR | reader |");
+
+        let Block::Table { headers, rows } = &document.blocks[0] else {
+            panic!("expected table block");
+        };
+        assert_eq!(headers.len(), 2);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(super::inline_text(&headers[0]), "Name");
     }
 }
