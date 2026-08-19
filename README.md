@@ -21,6 +21,7 @@ The current version can:
 - show a navigable outline in a dedicated sidebar;
 - browse Markdown files from the same sidebar and open them without leaving the workspace;
 - render headings, paragraphs, emphasis, links, lists, task lists, quotes, code blocks, tables and thematic breaks;
+- render local Markdown and HTML images with terminal-aware sizing;
 - reload the active document when it changes on disk;
 - switch between documents without leaving the workspace;
 - search the rendered document and move between matches;
@@ -111,7 +112,7 @@ The short-term roadmap includes:
 - add syntax highlighting for fenced code;
 - add mouse-aware selection and clipboard support;
 - add configurable themes and terminal hyperlinks;
-- support images and more Markdown extensions where the terminal allows it;
+- support more Markdown extensions where the terminal allows it;
 - explore editing and assisted documentation workflows after the reader experience is solid.
 
 The reader comes first. A tool that cannot make reading pleasant has no business trying to become an editor, or a small operating system with a Markdown hobby.
