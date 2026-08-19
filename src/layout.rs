@@ -26,33 +26,42 @@ pub fn build(document: &Document, width: u16, theme: Theme) -> DocumentLayout {
     for block in &document.blocks {
         match block {
             Block::Heading { level, content } => {
-                lines.push(Line::default());
                 heading_lines.push(lines.len());
-                let marker = format!("{} ", "#".repeat(*level as usize));
                 push_wrapped_inlines(
                     content,
-                    Some(marker),
+                    None,
                     heading_style(*level, theme),
                     max_width,
+                    theme,
                     &mut lines,
                 );
+                if *level == 1 {
+                    lines.push(Line::from(Span::styled(
+                        "─".repeat(max_width),
+                        theme.border,
+                    )));
+                }
             }
             Block::Paragraph {
                 content,
                 quote_depth,
             } => {
                 let prefix = if *quote_depth > 0 {
-                    Some("│ ".to_string())
+                    Some(format!(
+                        "{}│ ",
+                        "  ".repeat(quote_depth.saturating_sub(1) as usize)
+                    ))
                 } else {
                     None
                 };
-                push_wrapped_inlines(
-                    content,
-                    prefix,
-                    Style::default().fg(theme.text),
-                    max_width,
-                    &mut lines,
-                );
+                let base_style = if *quote_depth > 0 {
+                    Style::default()
+                        .fg(theme.text_muted)
+                        .add_modifier(Modifier::ITALIC)
+                } else {
+                    Style::default().fg(theme.text)
+                };
+                push_wrapped_inlines(content, prefix, base_style, max_width, theme, &mut lines);
             }
             Block::List { ordered, items } => {
                 for (index, item) in items.iter().enumerate() {
@@ -64,6 +73,7 @@ pub fn build(document: &Document, width: u16, theme: Theme) -> DocumentLayout {
                         Some(format!("{marker} ")),
                         Style::default().fg(theme.text),
                         max_width,
+                        theme,
                         &mut lines,
                     );
                 }
@@ -72,17 +82,19 @@ pub fn build(document: &Document, width: u16, theme: Theme) -> DocumentLayout {
                 let label = language.as_deref().unwrap_or("code");
                 lines.push(Line::from(Span::styled(
                     format!("  ┌─ {label}"),
-                    Style::default().fg(theme.code),
+                    Style::default().fg(theme.code).bg(theme.surface),
                 )));
                 for highlighted_line in syntax::highlight(language.as_deref(), code, theme) {
-                    let mut code_spans =
-                        vec![Span::styled("  │ ", Style::default().fg(theme.code))];
+                    let mut code_spans = vec![Span::styled(
+                        "  │ ",
+                        Style::default().fg(theme.code).bg(theme.surface),
+                    )];
                     code_spans.extend(highlighted_line);
                     lines.push(Line::from(code_spans));
                 }
                 lines.push(Line::from(Span::styled(
                     "  └─",
-                    Style::default().fg(theme.code),
+                    Style::default().fg(theme.code).bg(theme.surface),
                 )));
             }
             Block::Table { headers, rows } => {
@@ -97,7 +109,7 @@ pub fn build(document: &Document, width: u16, theme: Theme) -> DocumentLayout {
                         theme.title(),
                     )));
                     lines.push(Line::from(Span::styled(
-                        "├──────────────────────────────┤",
+                        format!("├{}┤", "─".repeat(max_width.saturating_sub(2))),
                         theme.muted(),
                     )));
                 }
@@ -114,7 +126,7 @@ pub fn build(document: &Document, width: u16, theme: Theme) -> DocumentLayout {
                 }
             }
             Block::ThematicBreak => lines.push(Line::from(Span::styled(
-                "  ─────────────────────────────",
+                "─".repeat(max_width),
                 theme.border,
             ))),
             Block::Html(html) => {
@@ -135,13 +147,14 @@ fn push_wrapped_inlines(
     prefix: Option<String>,
     base_style: Style,
     max_width: usize,
+    theme: Theme,
     lines: &mut Vec<Line<'static>>,
 ) {
     let mut builder = LineBuilder::new(prefix, max_width);
     for inline in content {
         builder.push_text(
             &inline.text,
-            inline_style(inline.style, inline.link.is_some(), base_style),
+            inline_style(inline.style, inline.link.is_some(), base_style, theme),
             lines,
         );
     }
@@ -228,7 +241,7 @@ impl LineBuilder {
     }
 }
 
-fn inline_style(style: InlineStyle, link: bool, base: Style) -> Style {
+fn inline_style(style: InlineStyle, link: bool, base: Style, theme: Theme) -> Style {
     let mut result = base;
     if style.emphasis {
         result = result.add_modifier(Modifier::ITALIC);
@@ -240,12 +253,10 @@ fn inline_style(style: InlineStyle, link: bool, base: Style) -> Style {
         result = result.add_modifier(Modifier::CROSSED_OUT);
     }
     if style.code {
-        result = result.fg(ratatui::style::Color::Rgb(219, 180, 108));
+        result = result.fg(theme.code).bg(theme.surface_active);
     }
     if link {
-        result = result
-            .fg(ratatui::style::Color::Rgb(107, 174, 255))
-            .add_modifier(Modifier::UNDERLINED);
+        result = result.fg(theme.link).add_modifier(Modifier::UNDERLINED);
     }
     result
 }
@@ -285,5 +296,27 @@ mod tests {
 
         assert_eq!(layout.heading_lines.len(), 2);
         assert!(layout.heading_line(1).unwrap() > layout.heading_line(0).unwrap());
+    }
+
+    #[test]
+    fn renders_heading_text_without_markdown_markers() {
+        let layout = build(&Document::parse("# Title"), 12, Theme::default());
+
+        assert_eq!(layout.lines[0].to_string(), "Title");
+        assert_eq!(layout.lines[1].to_string(), "────────────");
+    }
+
+    #[test]
+    fn gives_inline_code_a_surface_and_code_color() {
+        let theme = Theme::default();
+        let layout = build(&Document::parse("Use `cargo check` here."), 40, theme);
+        let code_span = layout.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content == "cargo check")
+            .expect("inline code span");
+
+        assert_eq!(code_span.style.bg, Some(theme.surface_active));
+        assert_eq!(code_span.style.fg, Some(theme.code));
     }
 }
