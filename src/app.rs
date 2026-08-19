@@ -11,8 +11,14 @@ use crate::workspace::Workspace;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
-    Outline,
+    Sidebar,
     Document,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarPanel {
+    Outline,
+    Files,
 }
 
 #[derive(Debug)]
@@ -28,8 +34,10 @@ pub struct App {
     pub document: Document,
     pub theme: Theme,
     pub focus: Focus,
+    pub sidebar_panel: SidebarPanel,
     pub scroll: usize,
     pub outline_selected: usize,
+    pub file_selected: usize,
     pub sidebar_visible: bool,
     pub help_visible: bool,
     pub terminal_width: u16,
@@ -52,8 +60,10 @@ impl App {
             document,
             theme: Theme::default(),
             focus: Focus::Document,
+            sidebar_panel: SidebarPanel::Outline,
             scroll: 0,
             outline_selected: 0,
+            file_selected: 0,
             sidebar_visible: true,
             help_visible: false,
             terminal_width: 120,
@@ -73,10 +83,18 @@ impl App {
     }
 
     pub fn document_width(&self) -> u16 {
-        let sidebar_width = if self.sidebar_visible { 29 } else { 0 };
+        let sidebar_width = if self.sidebar_visible {
+            self.sidebar_width()
+        } else {
+            0
+        };
         self.terminal_width
             .saturating_sub(sidebar_width)
             .saturating_sub(5)
+    }
+
+    pub fn sidebar_width(&self) -> u16 {
+        33
     }
 
     pub fn update(&mut self, message: Message) {
@@ -119,6 +137,8 @@ impl App {
             KeyCode::Char('n') => self.next_search_match(),
             KeyCode::Char('N') => self.previous_search_match(),
             KeyCode::Char('t') => self.sidebar_visible = !self.sidebar_visible,
+            KeyCode::Char('1') => self.select_sidebar_panel(SidebarPanel::Outline),
+            KeyCode::Char('2') => self.select_sidebar_panel(SidebarPanel::Files),
             KeyCode::Tab => self.focus = toggle_focus(self.focus),
             KeyCode::Char(']') => self.switch_file(true),
             KeyCode::Char('[') => self.switch_file(false),
@@ -130,7 +150,7 @@ impl App {
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => self.page_down(),
             KeyCode::Char('g') => self.scroll = 0,
             KeyCode::Char('G') => self.scroll = usize::MAX,
-            KeyCode::Enter if self.focus == Focus::Outline => self.jump_to_selected_heading(),
+            KeyCode::Enter if self.focus == Focus::Sidebar => self.activate_sidebar_selection(),
             _ => {}
         }
     }
@@ -210,19 +230,32 @@ impl App {
 
     fn move_up(&mut self) {
         match self.focus {
-            Focus::Outline => self.outline_selected = self.outline_selected.saturating_sub(1),
+            Focus::Sidebar => match self.sidebar_panel {
+                SidebarPanel::Outline => {
+                    self.outline_selected = self.outline_selected.saturating_sub(1)
+                }
+                SidebarPanel::Files => self.file_selected = self.file_selected.saturating_sub(1),
+            },
             Focus::Document => self.scroll = self.scroll.saturating_sub(1),
         }
     }
 
     fn move_down(&mut self) {
         match self.focus {
-            Focus::Outline => {
-                if !self.document.outline.is_empty() {
-                    self.outline_selected =
-                        (self.outline_selected + 1).min(self.document.outline.len() - 1);
+            Focus::Sidebar => match self.sidebar_panel {
+                SidebarPanel::Outline => {
+                    if !self.document.outline.is_empty() {
+                        self.outline_selected =
+                            (self.outline_selected + 1).min(self.document.outline.len() - 1);
+                    }
                 }
-            }
+                SidebarPanel::Files => {
+                    if !self.workspace.files.is_empty() {
+                        self.file_selected =
+                            (self.file_selected + 1).min(self.workspace.files.len() - 1);
+                    }
+                }
+            },
             Focus::Document => self.scroll = self.scroll.saturating_add(1),
         }
     }
@@ -247,6 +280,31 @@ impl App {
         }
     }
 
+    fn select_sidebar_panel(&mut self, panel: SidebarPanel) {
+        self.sidebar_panel = panel;
+        self.sidebar_visible = true;
+        self.focus = Focus::Sidebar;
+    }
+
+    fn activate_sidebar_selection(&mut self) {
+        match self.sidebar_panel {
+            SidebarPanel::Outline => self.jump_to_selected_heading(),
+            SidebarPanel::Files => self.open_selected_file(),
+        }
+    }
+
+    fn open_selected_file(&mut self) {
+        if self.workspace.files.get(self.file_selected).is_none() {
+            return;
+        }
+        self.workspace.selected = self.file_selected;
+        self.outline_selected = 0;
+        self.scroll = 0;
+        self.clear_search();
+        self.load_active_file();
+        self.focus = Focus::Document;
+    }
+
     fn switch_file(&mut self, next: bool) {
         if self.workspace.files.len() < 2 {
             return;
@@ -256,6 +314,7 @@ impl App {
         } else {
             self.workspace.previous_file();
         }
+        self.file_selected = self.workspace.selected;
         self.outline_selected = 0;
         self.scroll = 0;
         self.clear_search();
@@ -276,6 +335,7 @@ impl App {
                 self.outline_selected = self
                     .outline_selected
                     .min(self.document.outline.len().saturating_sub(1));
+                self.file_selected = self.workspace.selected;
                 self.last_modified = modified_time(self.workspace.active_path());
                 self.error = None;
                 self.clear_search();
@@ -312,8 +372,8 @@ fn find_matches(lines: &[ratatui::text::Line<'static>], query: &str) -> Vec<usiz
 
 fn toggle_focus(focus: Focus) -> Focus {
     match focus {
-        Focus::Outline => Focus::Document,
-        Focus::Document => Focus::Outline,
+        Focus::Sidebar => Focus::Document,
+        Focus::Document => Focus::Sidebar,
     }
 }
 
