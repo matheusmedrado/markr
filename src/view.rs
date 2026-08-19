@@ -87,16 +87,20 @@ fn render_body(frame: &mut Frame, app: &App, area: Rect) {
 
     let content_width = usize::from(inner.width).min(layout::MAX_CONTENT_WIDTH);
     for region in &document_layout.image_regions {
-        let Some(Asset::Ready {
-            protocol,
-            cols,
-            rows,
-        }) = app.images.asset(&region.src)
-        else {
+        let Some(Asset::Ready { cols, rows, .. }) = app.images.asset(&region.src) else {
             continue;
         };
-        if let Some(rect) = image_rect(inner, content_width, region.line, app.scroll, *cols, *rows)
+        if let Some((rect, skipped_rows)) =
+            image_rect(inner, content_width, region.line, app.scroll, *cols, *rows)
         {
+            let Some(asset) = app.images.asset(&region.src) else {
+                continue;
+            };
+            let Some(protocol) =
+                crate::images::ImageStore::protocol_for_scroll(asset, skipped_rows)
+            else {
+                continue;
+            };
             frame.render_widget(TerminalImage::new(protocol), rect);
         }
     }
@@ -334,7 +338,7 @@ fn image_rect(
     scroll: usize,
     image_width: u16,
     image_height: u16,
-) -> Option<Rect> {
+) -> Option<(Rect, usize)> {
     let viewport_start = scroll;
     let viewport_end = scroll.saturating_add(usize::from(inner.height));
     let image_end = image_line.saturating_add(usize::from(image_height));
@@ -349,7 +353,10 @@ fn image_rect(
     let content_x = inner.x + (inner.width.saturating_sub(content_width)) / 2;
     let x = content_x + (content_width.saturating_sub(width)) / 2;
     let y = inner.y + visible_start.saturating_sub(scroll) as u16;
-    Some(Rect::new(x, y, width, (visible_end - visible_start) as u16))
+    Some((
+        Rect::new(x, y, width, (visible_end - visible_start) as u16),
+        visible_start.saturating_sub(image_line),
+    ))
 }
 
 #[cfg(test)]
@@ -362,17 +369,21 @@ mod tests {
     fn centers_images_inside_the_content_column() {
         let rect = image_rect(Rect::new(10, 5, 100, 20), 88, 4, 0, 40, 10).unwrap();
 
+        let (rect, skipped_rows) = rect;
         assert_eq!(rect.x, 40);
         assert_eq!(rect.y, 9);
         assert_eq!(rect.width, 40);
         assert_eq!(rect.height, 10);
+        assert_eq!(skipped_rows, 0);
     }
 
     #[test]
     fn keeps_partially_visible_images_on_screen_after_scroll() {
         let rect = image_rect(Rect::new(10, 5, 100, 20), 88, 4, 8, 40, 10).unwrap();
 
+        let (rect, skipped_rows) = rect;
         assert_eq!(rect.y, 5);
         assert_eq!(rect.height, 6);
+        assert_eq!(skipped_rows, 4);
     }
 }
