@@ -220,6 +220,7 @@ struct LineBuilder {
     width: usize,
     spans: Vec<Span<'static>>,
     continuation: bool,
+    pending_whitespace: Option<(String, Style, usize)>,
 }
 
 impl LineBuilder {
@@ -236,43 +237,100 @@ impl LineBuilder {
             width: 0,
             spans: Vec::new(),
             continuation: false,
+            pending_whitespace: None,
         };
         builder.reset();
         builder
     }
 
     fn push_text(&mut self, text: &str, style: Style, lines: &mut Vec<Line<'static>>) {
-        let mut chunk = String::new();
+        let mut token = String::new();
+        let mut token_is_whitespace = None;
+
         for grapheme in text.graphemes(true) {
             if grapheme == "\n" {
-                self.flush(&mut chunk, style);
+                self.push_token(&mut token, token_is_whitespace, style, lines);
+                token_is_whitespace = None;
                 self.finish(lines);
                 continue;
             }
 
+            let is_whitespace = grapheme.chars().all(char::is_whitespace);
+            if token_is_whitespace != Some(is_whitespace) {
+                self.push_token(&mut token, token_is_whitespace, style, lines);
+                token_is_whitespace = Some(is_whitespace);
+            }
+            token.push_str(grapheme);
+        }
+        self.push_token(&mut token, token_is_whitespace, style, lines);
+    }
+
+    fn push_token(
+        &mut self,
+        token: &mut String,
+        is_whitespace: Option<bool>,
+        style: Style,
+        lines: &mut Vec<Line<'static>>,
+    ) {
+        if token.is_empty() {
+            return;
+        }
+
+        let token_width = text_width(token);
+        if is_whitespace == Some(true) {
+            if self.width > self.prefix_width {
+                self.pending_whitespace = Some((std::mem::take(token), style, token_width));
+            } else {
+                token.clear();
+            }
+            return;
+        }
+
+        let pending_width = self
+            .pending_whitespace
+            .as_ref()
+            .map(|(_, _, width)| *width)
+            .unwrap_or(0);
+        if self.width > self.prefix_width
+            && self.width + pending_width + token_width > self.max_width
+        {
+            self.finish(lines);
+        } else if let Some((mut whitespace, whitespace_style, whitespace_width)) =
+            self.pending_whitespace.take()
+        {
+            self.flush(&mut whitespace, whitespace_style);
+            self.width += whitespace_width;
+        }
+
+        let mut chunk = String::new();
+        for grapheme in token.graphemes(true) {
             let grapheme_width = text_width(grapheme);
-            let would_overflow = self.width + grapheme_width > self.max_width;
-            if would_overflow && self.width > self.prefix_width {
+            if self.width > self.prefix_width && self.width + grapheme_width > self.max_width {
                 self.flush(&mut chunk, style);
                 self.finish(lines);
-                if grapheme.chars().all(char::is_whitespace) {
-                    continue;
-                }
             }
-
             chunk.push_str(grapheme);
             self.width += grapheme_width;
         }
         self.flush(&mut chunk, style);
+        token.clear();
     }
 
     fn flush(&mut self, chunk: &mut String, style: Style) {
         if !chunk.is_empty() {
-            self.spans.push(Span::styled(std::mem::take(chunk), style));
+            if let Some(previous) = self.spans.last_mut()
+                && previous.style == style
+            {
+                previous.content.to_mut().push_str(chunk);
+                chunk.clear();
+            } else {
+                self.spans.push(Span::styled(std::mem::take(chunk), style));
+            }
         }
     }
 
     fn finish(&mut self, lines: &mut Vec<Line<'static>>) {
+        self.pending_whitespace = None;
         lines.push(Line::from(std::mem::take(&mut self.spans)));
         self.continuation = true;
         self.reset();
@@ -293,6 +351,7 @@ impl LineBuilder {
             .unwrap_or_default();
         self.prefix_width = prefix_text.as_deref().map(text_width).unwrap_or(0);
         self.width = self.prefix_width;
+        self.pending_whitespace = None;
         self.spans = prefix_text
             .map(|prefix| vec![Span::styled(prefix, prefix_style)])
             .unwrap_or_default();
@@ -306,40 +365,49 @@ fn render_code_block(
     theme: Theme,
     lines: &mut Vec<Line<'static>>,
 ) {
-    let label = language.unwrap_or("code");
+    let label = truncate_width(language.unwrap_or("code"), max_width.saturating_sub(5));
     let frame_style = Style::default().fg(theme.border).bg(theme.surface);
     let label_style = Style::default()
         .fg(theme.code)
         .bg(theme.surface)
         .add_modifier(Modifier::BOLD);
 
-    let header_width = 4 + text_width(label);
+    let header_width = text_width(&label);
     lines.push(Line::from(vec![
         Span::styled("┌─ ", frame_style),
-        Span::styled(label.to_string(), label_style),
+        Span::styled(label, label_style),
         Span::styled(
-            format!(" {}", "─".repeat(max_width.saturating_sub(header_width))),
+            format!(
+                " {}┐",
+                "─".repeat(max_width.saturating_sub(header_width + 5))
+            ),
             frame_style,
         ),
     ]));
 
     let fill_style = Style::default().bg(theme.surface);
+    let code_width = max_width.saturating_sub(4);
     for highlighted_line in syntax::highlight(language, code, theme) {
-        let mut line_width = 2;
+        let mut line_width = 0;
         let mut code_spans = vec![Span::styled("│ ", frame_style)];
         for span in highlighted_line {
-            line_width += text_width(span.content.as_ref());
-            code_spans.push(span);
+            let content =
+                truncate_width(span.content.as_ref(), code_width.saturating_sub(line_width));
+            line_width += text_width(content.as_str());
+            if !content.is_empty() {
+                code_spans.push(Span::styled(content, span.style));
+            }
         }
         code_spans.push(Span::styled(
-            " ".repeat(max_width.saturating_sub(line_width)),
+            " ".repeat(code_width.saturating_sub(line_width)),
             fill_style,
         ));
+        code_spans.push(Span::styled(" │", frame_style));
         lines.push(Line::from(code_spans));
     }
 
     lines.push(Line::from(Span::styled(
-        format!("└─{}", "─".repeat(max_width.saturating_sub(2))),
+        format!("└─{}┘", "─".repeat(max_width.saturating_sub(3))),
         frame_style,
     )));
 }
@@ -557,6 +625,19 @@ mod tests {
     }
 
     #[test]
+    fn wraps_between_words_before_splitting_them() {
+        let layout = build(
+            &Document::parse("alpha beta gamma delta"),
+            11,
+            Theme::default(),
+            &ImageStore::default(),
+        );
+
+        assert_eq!(layout.lines[0].to_string(), "alpha beta");
+        assert_eq!(layout.lines[1].to_string(), "gamma delta");
+    }
+
+    #[test]
     fn tracks_exact_heading_lines_after_wrapping() {
         let document = Document::parse(
             "# First\n\nA paragraph with enough words to wrap several times.\n\n## Second",
@@ -690,6 +771,13 @@ mod tests {
                 .lines
                 .iter()
                 .any(|line| line.to_string().starts_with("└─"))
+        );
+        assert!(
+            layout
+                .lines
+                .iter()
+                .filter(|line| line.to_string().starts_with("│ "))
+                .all(|line| line.to_string().ends_with(" │"))
         );
     }
 
