@@ -18,7 +18,7 @@ The current version can:
 
 - open a Markdown file, a directory of Markdown files or piped stdin;
 - discover Markdown files recursively inside a workspace;
-- show a navigable outline in a dedicated sidebar;
+- show a navigable outline and file browser in a transparent, responsive sidebar;
 - navigate the filesystem from the sidebar, enter and leave directories and open Markdown files from anywhere the process can read;
 - render headings, paragraphs, emphasis, links, lists, task lists, quotes, code blocks, tables and thematic breaks;
 - render local Markdown and HTML images with terminal-aware sizing;
@@ -59,16 +59,19 @@ When a directory is provided, MarkR recursively discovers files with the `.md`, 
 | Key | Action |
 | --- | --- |
 | `↑` / `↓`, `j` / `k` | Navigate the document or active sidebar panel |
-| `Tab` | Switch focus between the active sidebar panel and document |
-| `Enter` | Jump to the selected outline entry |
+| `Tab` | Switch focus between the document and sidebar |
+| `↑` / `↓` in sidebar | Move the visible selection in Outline or Files |
+| `←` / `→` in sidebar | Switch between Outline and Files |
+| `Enter` | Open or activate the selected entry |
+| `Esc` | Close help/sidebar overlay and return to the document |
 | `[` / `]` | Previous / next Markdown file |
 | `g` / `G` | Go to the top / bottom |
 | `Ctrl-u` / `Ctrl-d` | Page up / down |
-| `t` | Toggle the outline sidebar |
+| `t` | Toggle the sidebar |
 | `T` | Cycle through the built-in color themes |
 | `1` / `2` | Switch between outline and files |
-| `Enter`, `l` or `→` in Files | Enter a directory or open the selected Markdown file |
-| `h` or `←` in Files | Go to the parent directory |
+| `Enter` or `l` in Files | Enter a directory or open the selected Markdown file |
+| `h` or `Backspace` in Files | Go to the parent directory |
 | `r` in Files | Refresh the current directory |
 | `/` | Search the rendered document |
 | `Enter` / `Esc` while searching | Confirm / cancel the search |
@@ -80,13 +83,22 @@ The controls are intentionally small. MarkR may borrow a few ideas from modal ed
 
 ## Design direction
 
-MarkR aims for a terminal workspace with the atmosphere of a carefully configured editor:
+MarkR aims for a terminal workspace with the atmosphere of a carefully configured editor. The
+application chrome deliberately inherits the terminal's own background, including transparency and
+blur configured by the emulator. Only the Markdown reader, active selections, help and temporary
+messages use solid local surfaces:
 
 - calm dark and light palettes with restrained accent colors;
 - generous spacing and clear document hierarchy;
 - an outline that makes large documents feel smaller;
 - subtle borders and symbols instead of visual noise;
 - familiar interactions before clever ones.
+
+The reader is a borderless solid island with one cell of breathing room on every side on medium and
+wide terminals. A short orange editorial marker indicates document focus without framing the whole
+surface or adding a simulated shadow over the terminal's native background.
+Below 100 columns the sidebar becomes an overlay; below 72 columns it becomes a temporary full-screen
+panel. Choose `markr` or `midnight` for dark terminal backgrounds and `paper` for light ones.
 
 The terminal emulator controls the actual font, so MarkR does not try to change it behind the user's back. The visual identity comes from palette, spacing, symbols, borders and hierarchy. A clean monospace font with good Unicode support will provide the best result.
 
