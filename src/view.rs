@@ -41,14 +41,18 @@ impl FloatingReader {
 
 impl Widget for FloatingReader {
     fn render(self, area: Rect, buffer: &mut ratatui::buffer::Buffer) {
-        for y in area.y..area.bottom() {
-            for x in area.x..area.right() {
-                let cell = &mut buffer[(x, y)];
-                cell.set_symbol(" ");
-                cell.set_fg(self.theme.text);
-                cell.set_bg(self.theme.reader_background);
-            }
-        }
+        paint_rounded_surface(
+            buffer,
+            area,
+            self.theme.reader_background,
+            self.theme.background,
+        );
+        render_rounded_border(
+            buffer,
+            area,
+            self.theme.reader_border,
+            self.theme.background,
+        );
 
         let marker_start = area.y.saturating_add(2);
         let marker_end = area.y.saturating_add(5).min(area.bottom());
@@ -88,18 +92,44 @@ impl RoundedPanel {
 
 impl Widget for RoundedPanel {
     fn render(self, area: Rect, buffer: &mut ratatui::buffer::Buffer) {
-        paint_rounded_surface(buffer, area, self.theme.reader_background);
-        render_rounded_border(buffer, area, self.theme.reader_border);
+        paint_rounded_surface(
+            buffer,
+            area,
+            self.theme.reader_background,
+            self.theme.background,
+        );
+        render_rounded_border(
+            buffer,
+            area,
+            self.theme.reader_border,
+            self.theme.background,
+        );
     }
 }
 
 struct RoundedSidebar {
-    border: Color,
+    theme: Theme,
+    focused: bool,
 }
 
 impl Widget for RoundedSidebar {
     fn render(self, area: Rect, buffer: &mut ratatui::buffer::Buffer) {
-        render_rounded_border(buffer, area, self.border);
+        paint_rounded_surface(buffer, area, self.theme.surface, self.theme.background);
+        render_rounded_border(buffer, area, self.theme.border, self.theme.background);
+
+        let marker_start = area.y.saturating_add(2);
+        let marker_end = area.y.saturating_add(5).min(area.bottom());
+        let marker_color = if self.focused {
+            self.theme.accent
+        } else {
+            self.theme.border
+        };
+        for y in marker_start..marker_end {
+            let cell = &mut buffer[(area.x, y)];
+            cell.set_symbol("▎");
+            cell.set_fg(marker_color);
+            cell.set_bg(self.theme.surface);
+        }
     }
 }
 
@@ -107,10 +137,15 @@ fn rounded_border_inner(area: Rect) -> Rect {
     TuiBlock::default().borders(Borders::ALL).inner(area)
 }
 
-fn paint_rounded_surface(buffer: &mut ratatui::buffer::Buffer, area: Rect, background: Color) {
+fn paint_rounded_surface(
+    buffer: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    background: Color,
+    outer_background: Color,
+) {
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
-            buffer[(x, y)].set_bg(Color::Reset);
+            buffer[(x, y)].set_bg(outer_background);
         }
     }
 
@@ -131,7 +166,12 @@ fn paint_rounded_surface(buffer: &mut ratatui::buffer::Buffer, area: Rect, backg
     }
 }
 
-fn render_rounded_border(buffer: &mut ratatui::buffer::Buffer, area: Rect, border: Color) {
+fn render_rounded_border(
+    buffer: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    border: Color,
+    outer_background: Color,
+) {
     TuiBlock::default()
         .borders(Borders::ALL)
         .border_set(ratatui::symbols::border::ROUNDED)
@@ -148,14 +188,14 @@ fn render_rounded_border(buffer: &mut ratatui::buffer::Buffer, area: Rect, borde
                 area.bottom().saturating_sub(1),
             ),
         ] {
-            buffer[(x, y)].set_bg(Color::Reset);
+            buffer[(x, y)].set_bg(outer_background);
         }
     }
 }
 
 pub fn render(frame: &mut Frame, app: &App) {
     frame.render_widget(
-        TuiBlock::default().style(Style::default().bg(Color::Reset)),
+        TuiBlock::default().style(Style::default().bg(app.theme.background)),
         frame.area(),
     );
 
@@ -179,20 +219,10 @@ pub fn render(frame: &mut Frame, app: &App) {
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme;
-    let file_number = if app.workspace.files.is_empty() {
-        "stdin".to_string()
-    } else {
-        format!(
-            "{}/{}",
-            app.workspace.selected + 1,
-            app.workspace.files.len()
-        )
-    };
     let title = Line::from(vec![
         Span::styled("▰ MARKR", theme.accent()),
         Span::styled("  /  ", theme.muted()),
         Span::styled(app.workspace.display_name(), theme.title()),
-        Span::styled(format!("  ·  {file_number}"), theme.muted()),
     ]);
     frame.render_widget(Paragraph::new(title), area);
 }
@@ -200,7 +230,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 fn render_body(frame: &mut Frame, app: &App, area: Rect) {
     let now = Instant::now();
     if app.responsive_mode() == ResponsiveMode::Fullscreen && app.sidebar_visible {
-        clear_area(frame, area);
+        clear_area(frame, area, app.theme.background);
         render_sidebar(frame, app, area);
         return;
     }
@@ -227,7 +257,7 @@ fn render_body(frame: &mut Frame, app: &App, area: Rect) {
             ResponsiveMode::Fullscreen => area,
         };
         if app.responsive_mode() != ResponsiveMode::Attached {
-            clear_area(frame, sidebar_area);
+            clear_area(frame, sidebar_area, app.theme.background);
         }
         render_sidebar(frame, app, sidebar_area);
     }
@@ -252,9 +282,9 @@ fn reader_area(app: &App, area: Rect) -> Rect {
     )
 }
 
-fn clear_area(frame: &mut Frame, area: Rect) {
+fn clear_area(frame: &mut Frame, area: Rect, background: Color) {
     frame.render_widget(
-        TuiBlock::default().style(Style::default().bg(Color::Reset)),
+        TuiBlock::default().style(Style::default().bg(background)),
         area,
     );
 }
@@ -332,7 +362,8 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     }
     frame.render_widget(
         RoundedSidebar {
-            border: app.theme.border,
+            theme: app.theme,
+            focused: app.focus == Focus::Sidebar,
         },
         area,
     );
@@ -376,7 +407,11 @@ fn render_sidebar_tabs(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             underline,
-            Style::default().fg(app.theme.accent),
+            Style::default().fg(if app.focus == Focus::Sidebar {
+                app.theme.accent
+            } else {
+                app.theme.border
+            }),
         )))
         .alignment(Alignment::Left),
         Rect::new(
@@ -426,10 +461,10 @@ fn render_outline(frame: &mut Frame, app: &App, area: Rect) {
             .bg(theme.selection)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.accent)
+        Style::default().fg(theme.text_muted)
     };
     let list = List::new(items)
-        .style(Style::default().bg(Color::Reset))
+        .style(Style::default().bg(theme.surface))
         .highlight_style(highlight_style);
     let mut state = ListState::default()
         .with_selected((!app.document.outline.is_empty()).then_some(app.outline_selected));
@@ -489,10 +524,10 @@ fn render_files(frame: &mut Frame, app: &App, area: Rect) {
             .bg(theme.selection)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.accent)
+        Style::default().fg(theme.text_muted)
     };
     let list = List::new(items)
-        .style(Style::default().bg(Color::Reset))
+        .style(Style::default().bg(theme.surface))
         .highlight_style(highlight_style);
     let mut state = ListState::default().with_selected(
         (!app.file_explorer.entries().is_empty()).then_some(app.file_explorer.selected()),
@@ -625,10 +660,14 @@ fn highlight_selection_line(
 
 fn sidebar_tab_style(app: &App, panel: SidebarPanel) -> Style {
     if app.sidebar_panel == panel {
-        Style::default()
-            .fg(app.theme.accent)
-            .bg(app.theme.accent_soft)
-            .add_modifier(Modifier::BOLD)
+        if app.focus == Focus::Sidebar {
+            Style::default()
+                .fg(app.theme.accent)
+                .bg(app.theme.accent_soft)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.text_muted)
+        }
     } else {
         app.theme.muted()
     }
@@ -879,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn floating_reader_is_a_borderless_island_with_an_editorial_marker() {
+    fn floating_reader_is_a_rounded_panel_with_an_editorial_marker() {
         let theme = Theme::default();
         let mut terminal = Terminal::new(TestBackend::new(20, 10)).expect("terminal");
         terminal
@@ -889,12 +928,12 @@ mod tests {
             .expect("render reader");
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(2, 2)].symbol(), " ");
-        assert_eq!(buffer[(13, 2)].symbol(), " ");
-        assert_eq!(buffer[(2, 7)].symbol(), " ");
-        assert_eq!(buffer[(13, 7)].symbol(), " ");
-        assert_eq!(buffer[(2, 2)].bg, theme.reader_background);
-        assert_eq!(buffer[(13, 7)].bg, theme.reader_background);
+        assert_eq!(buffer[(2, 2)].symbol(), "╭");
+        assert_eq!(buffer[(13, 2)].symbol(), "╮");
+        assert_eq!(buffer[(2, 7)].symbol(), "╰");
+        assert_eq!(buffer[(13, 7)].symbol(), "╯");
+        assert_eq!(buffer[(2, 2)].bg, theme.background);
+        assert_eq!(buffer[(13, 7)].bg, theme.background);
         assert_eq!(buffer[(5, 4)].bg, theme.reader_background);
         assert_eq!(buffer[(2, 4)].symbol(), "▎");
         assert_eq!(buffer[(2, 4)].fg, theme.accent);
@@ -906,38 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_keeps_external_cells_on_the_terminal_background() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
-        let workspace = Workspace::open(Some(path), true).expect("README workspace");
-        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
-        app.update(Message::Resize {
-            width: 120,
-            height: 40,
-            at: Instant::now(),
-        });
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
-        terminal
-            .draw(|frame| super::render(frame, &app))
-            .expect("render shell");
-
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(0, 0)].bg, Color::Reset);
-        assert_eq!(buffer[(31, 2)].bg, Color::Reset);
-        assert_eq!(buffer[(0, 1)].symbol(), "╭");
-        assert_eq!(buffer[(29, 1)].symbol(), "╮");
-        assert_eq!(buffer[(0, 38)].symbol(), "╰");
-        assert_eq!(buffer[(29, 38)].symbol(), "╯");
-        assert_eq!(buffer[(0, 1)].bg, Color::Reset);
-        assert_eq!(buffer[(32, 1)].bg, Theme::default().reader_background);
-        assert_eq!(buffer[(35, 2)].bg, Theme::default().reader_background);
-        assert_eq!(buffer[(119, 1)].bg, Color::Reset);
-        assert_eq!(buffer[(119, 1)].symbol(), " ");
-        assert_eq!(buffer[(32, 3)].symbol(), "▎");
-        assert_eq!(buffer[(32, 3)].fg, Theme::default().accent);
-    }
-
-    #[test]
-    fn sidebar_keeps_transparent_background_and_renders_tab_underline() {
+    fn shell_uses_the_thematic_background_around_panels() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
         let workspace = Workspace::open(Some(path), true).expect("README workspace");
         let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
@@ -953,10 +961,78 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let theme = Theme::default();
-        assert_eq!(buffer[(1, 5)].bg, Color::Reset);
+        let header = (0..120).fold(String::new(), |mut text, x| {
+            text.push_str(buffer[(x, 0)].symbol());
+            text
+        });
+        assert!(!header.contains("1/1"));
+        assert_eq!(buffer[(0, 0)].bg, theme.background);
+        assert_eq!(buffer[(31, 2)].bg, theme.background);
         assert_eq!(buffer[(0, 1)].symbol(), "╭");
-        assert_eq!(buffer[(0, 1)].bg, Color::Reset);
-        assert_eq!(buffer[(2, 3)].fg, theme.accent);
+        assert_eq!(buffer[(29, 1)].symbol(), "╮");
+        assert_eq!(buffer[(0, 38)].symbol(), "╰");
+        assert_eq!(buffer[(29, 38)].symbol(), "╯");
+        assert_eq!(buffer[(0, 1)].bg, theme.background);
+        assert_eq!(buffer[(0, 3)].symbol(), "▎");
+        assert_eq!(buffer[(0, 3)].fg, theme.border);
+        assert_eq!(buffer[(32, 1)].bg, theme.background);
+        assert_eq!(buffer[(35, 2)].bg, Theme::default().reader_background);
+        assert_eq!(buffer[(119, 1)].bg, theme.background);
+        assert_eq!(buffer[(119, 1)].symbol(), " ");
+        assert_eq!(buffer[(32, 3)].symbol(), "▎");
+        assert_eq!(buffer[(32, 3)].fg, Theme::default().accent);
+    }
+
+    #[test]
+    fn sidebar_uses_a_thematic_surface_and_renders_tab_underline() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| super::render(frame, &app))
+            .expect("render shell");
+
+        let buffer = terminal.backend().buffer();
+        let theme = Theme::default();
+        assert_eq!(buffer[(1, 5)].bg, theme.surface);
+        assert_eq!(buffer[(0, 1)].symbol(), "╭");
+        assert_eq!(buffer[(0, 1)].bg, theme.background);
+        assert_eq!(buffer[(2, 3)].fg, theme.border);
+    }
+
+    #[test]
+    fn focused_sidebar_uses_the_same_editorial_marker_as_the_reader() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+        app.update(Message::Key {
+            key: crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            at: Instant::now(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| super::render(frame, &app))
+            .expect("render focused sidebar");
+
+        let buffer = terminal.backend().buffer();
+        let theme = Theme::default();
+        assert_eq!(buffer[(0, 3)].symbol(), "▎");
+        assert_eq!(buffer[(0, 3)].fg, theme.accent);
+        assert_eq!(buffer[(2, 2)].bg, theme.accent_soft);
     }
 
     #[test]
