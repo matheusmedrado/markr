@@ -32,13 +32,39 @@ The current version can:
 - use familiar arrow-key controls alongside a small set of vim-inspired shortcuts;
 - capture mouse input to support selection inside the reader.
 
-## Installation
+## Practical quick start — macOS and Linux
 
-Rust and Cargo are required. Once the project is cloned, run it directly with Cargo:
+MarkR runs in a regular terminal on macOS or Linux, including macOS Terminal, iTerm2, GNOME
+Terminal, Konsole and similar terminals.
+
+### 1. Install Rust
+
+If Rust and Cargo are already installed, skip this step. Otherwise, run the official installer:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+Close and reopen the terminal if the `cargo` command is still unavailable.
+
+### 2. Clone the project
+
+```bash
+git clone https://github.com/matheusmedrado/markr.git
+cd markr
+```
+
+### 3. Run MarkR
+
+Open the included README as a test document:
 
 ```bash
 cargo run -- README.md
 ```
+
+Once the interface opens, use the mouse wheel or `↑` / `↓` to scroll, `Tab` to switch between the
+reader and sidebar, and `q` to quit.
 
 You can also open a workspace directory or pipe a document through stdin:
 

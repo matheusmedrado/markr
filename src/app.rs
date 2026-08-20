@@ -565,28 +565,29 @@ impl App {
         }
     }
 
-    fn handle_mouse(&mut self, event: crossterm::event::MouseEvent, _at: Instant) {
+    fn handle_mouse(&mut self, event: crossterm::event::MouseEvent, at: Instant) {
         use crossterm::event::{MouseButton, MouseEventKind};
 
         if self.focus != Focus::Document {
             return;
         }
-        if self.responsive_mode == ResponsiveMode::Overlay
-            && self.sidebar_visible
-            && event.column < self.sidebar_width()
-        {
-            return;
-        }
-        let Some(position) = self.document_position_at(event.column, event.row) else {
-            return;
-        };
 
         match event.kind {
+            MouseEventKind::ScrollUp if self.mouse_is_over_reader(event.column, event.row) => {
+                self.move_up(at);
+            }
+            MouseEventKind::ScrollDown if self.mouse_is_over_reader(event.column, event.row) => {
+                self.move_down(at);
+            }
             MouseEventKind::Down(MouseButton::Left) => {
-                self.start_selection(position);
+                if let Some(position) = self.document_position_at(event.column, event.row) {
+                    self.start_selection(position);
+                }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                self.update_selection(position);
+                if let Some(position) = self.document_position_at(event.column, event.row) {
+                    self.update_selection(position);
+                }
             }
             MouseEventKind::Up(MouseButton::Left)
                 if self
@@ -600,7 +601,34 @@ impl App {
         }
     }
 
+    fn mouse_is_over_reader(&self, screen_x: u16, screen_y: u16) -> bool {
+        if self.responsive_mode == ResponsiveMode::Overlay
+            && self.sidebar_visible
+            && screen_x < self.sidebar_width()
+        {
+            return false;
+        }
+
+        let document_area = self.reader_outer_area();
+        let inner_x = document_area.x.saturating_add(3);
+        let inner_y = document_area.y.saturating_add(1);
+        let inner_width = document_area.width.saturating_sub(5);
+        let inner_height = document_area.height.saturating_sub(2);
+
+        screen_x >= inner_x
+            && screen_x < inner_x.saturating_add(inner_width)
+            && screen_y >= inner_y
+            && screen_y < inner_y.saturating_add(inner_height)
+    }
+
     fn document_position_at(&self, screen_x: u16, screen_y: u16) -> Option<CursorPosition> {
+        if self.responsive_mode == ResponsiveMode::Overlay
+            && self.sidebar_visible
+            && screen_x < self.sidebar_width()
+        {
+            return None;
+        }
+
         let document_area = self.reader_outer_area();
         if document_area.width == 0 || document_area.height == 0 {
             return None;
@@ -1117,7 +1145,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Instant;
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::text::Line;
     use ratatui_image::picker::Picker;
 
@@ -1134,6 +1162,18 @@ mod tests {
     fn key(code: KeyCode) -> Message {
         Message::Key {
             key: KeyEvent::new(code, KeyModifiers::NONE),
+            at: Instant::now(),
+        }
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Message {
+        Message::Mouse {
+            event: MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
             at: Instant::now(),
         }
     }
@@ -1287,6 +1327,26 @@ mod tests {
         assert!(app.selection.is_some());
         let selection = app.selection.as_ref().expect("clamped selection");
         assert!(selection.anchor.line < app.document_layout.lines.len());
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_the_reader_but_not_the_sidebar() {
+        let mut app = readme_app();
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+
+        app.update(mouse(MouseEventKind::ScrollDown, 35, 3));
+        assert_eq!(app.scroll, 1);
+
+        app.update(mouse(MouseEventKind::ScrollUp, 35, 3));
+        assert_eq!(app.scroll, 0);
+
+        app.update(key(KeyCode::Tab));
+        app.update(mouse(MouseEventKind::ScrollDown, 5, 3));
+        assert_eq!(app.scroll, 0);
     }
 
     #[test]
