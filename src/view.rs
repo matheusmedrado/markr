@@ -9,11 +9,14 @@ use ratatui::widgets::{
     Block as TuiBlock, Borders, Clear, List, ListItem, ListState, Paragraph, Widget,
 };
 use ratatui_image::sliced::{SignedPosition, SlicedImage};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Focus, ResponsiveMode, SidebarPanel};
 use crate::explorer::EntryKind;
 use crate::images::Asset;
 use crate::layout;
+use crate::selection;
 use crate::theme::Theme;
 
 pub struct FloatingReader {
@@ -265,6 +268,10 @@ fn render_reader(frame: &mut Frame, app: &App, document_area: Rect) {
     let inner = FloatingReader::inner(document_area);
     let start = app.scroll.min(app.document_layout.lines.len());
     let end = start.saturating_add(usize::from(inner.height));
+    let selection_range = app
+        .selection
+        .as_ref()
+        .map(|selection| selection.normalized());
     let visible_lines = app.document_layout.lines[start..end.min(app.document_layout.lines.len())]
         .iter()
         .enumerate()
@@ -279,7 +286,19 @@ fn render_reader(frame: &mut Frame, app: &App, document_area: Rect) {
                     )
                 })
                 .collect::<Vec<_>>();
-            highlight_search_line(line, &highlights, theme)
+            let highlighted = highlight_search_line(line, &highlights, theme);
+            if let Some((sel_start, sel_end)) = selection_range {
+                highlight_selection_line(
+                    &highlighted,
+                    line_index,
+                    &sel_start,
+                    &sel_end,
+                    app.document_layout.content_margin,
+                    theme,
+                )
+            } else {
+                highlighted
+            }
         })
         .collect::<Vec<_>>();
     let paragraph = Paragraph::new(Text::from(visible_lines))
@@ -539,6 +558,71 @@ fn highlight_search_line(
     Line::from(spans)
 }
 
+fn highlight_selection_line(
+    line: &Line<'static>,
+    line_index: usize,
+    start: &selection::CursorPosition,
+    end: &selection::CursorPosition,
+    content_margin: usize,
+    theme: Theme,
+) -> Line<'static> {
+    if line_index < start.line || line_index > end.line {
+        return line.clone();
+    }
+
+    let style = selection::selection_style(theme);
+    let start_col = if line_index == start.line {
+        content_margin.saturating_add(start.column)
+    } else {
+        content_margin
+    };
+    let end_col = if line_index == end.line {
+        content_margin.saturating_add(end.column)
+    } else {
+        usize::MAX
+    };
+
+    if start_col >= end_col {
+        return line.clone();
+    }
+
+    let mut spans = Vec::new();
+    let mut column = 0;
+    for span in &line.spans {
+        let content = span.content.as_ref();
+        let mut segment = String::new();
+        let mut segment_style = None;
+        for grapheme in content.graphemes(true) {
+            let grapheme_start = column;
+            let grapheme_end = column + grapheme.width();
+            let selected = grapheme_end > grapheme_start
+                && grapheme_start < end_col
+                && grapheme_end > start_col;
+            let grapheme_style = if selected {
+                span.style.patch(style)
+            } else {
+                span.style
+            };
+
+            if segment_style != Some(grapheme_style) {
+                if !segment.is_empty() {
+                    spans.push(Span::styled(
+                        std::mem::take(&mut segment),
+                        segment_style.unwrap(),
+                    ));
+                }
+                segment_style = Some(grapheme_style);
+            }
+            segment.push_str(grapheme);
+            column = grapheme_end;
+        }
+        if !segment.is_empty() {
+            spans.push(Span::styled(segment, segment_style.unwrap()));
+        }
+    }
+    Line::from(spans)
+}
+
 fn sidebar_tab_style(app: &App, panel: SidebarPanel) -> Style {
     if app.sidebar_panel == panel {
         Style::default()
@@ -645,6 +729,10 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from(" r              refresh explorer"),
         Line::from(" /              search rendered text"),
         Line::from(" n / N          next / previous match"),
+        Line::from(" v              start keyboard selection"),
+        Line::from(" arrows / hjkl  extend selection"),
+        Line::from(" y              copy selection"),
+        Line::from(" mouse drag     select inside reader"),
         Line::from(" q              quit"),
         Line::default(),
         Line::from(Span::styled(" Press any key to return ", theme.muted())),
@@ -715,9 +803,10 @@ mod tests {
     use ratatui::text::{Line, Span};
     use ratatui_image::picker::{Picker, ProtocolType};
 
-    use super::{FloatingReader, highlight_search_line, image_position};
+    use super::{FloatingReader, highlight_search_line, highlight_selection_line, image_position};
     use crate::app::{App, Message};
     use crate::images::Asset;
+    use crate::selection::CursorPosition;
     use crate::theme::Theme;
     use crate::workspace::Workspace;
 
@@ -763,6 +852,30 @@ mod tests {
         assert_eq!(reader.style.bg, Some(theme.accent));
         assert_eq!(reader.style.fg, Some(theme.background));
         assert!(reader.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn highlights_unicode_selection_without_splitting_utf8() {
+        let theme = Theme::default();
+        let line = Line::from(vec![
+            Span::styled("aé", Style::default().fg(theme.link)),
+            Span::styled("界b", Style::default().fg(theme.text)),
+        ]);
+
+        let highlighted = highlight_selection_line(
+            &line,
+            0,
+            &CursorPosition::new(0, 1),
+            &CursorPosition::new(0, 4),
+            0,
+            theme,
+        );
+
+        assert_eq!(highlighted.to_string(), "aé界b");
+        assert_eq!(highlighted.spans[1].content, "é");
+        assert_eq!(highlighted.spans[1].style.bg, Some(theme.accent));
+        assert_eq!(highlighted.spans[2].content, "界");
+        assert_eq!(highlighted.spans[2].style.bg, Some(theme.accent));
     }
 
     #[test]
