@@ -27,11 +27,10 @@ The current version can:
 - reload the active document when it changes on disk;
 - switch between documents without leaving the workspace;
 - search the rendered document with visible highlights for every match and a distinct active result;
+- select and copy text inside the reader with the keyboard or mouse;
 - start with one of three built-in color themes and switch palettes without restarting;
 - use familiar arrow-key controls alongside a small set of vim-inspired shortcuts;
-- preserve the terminal emulator's native text selection and copying.
-
-The mouse is intentionally not captured yet. This means the terminal can still do what terminals have been doing since before anyone tried to put a web browser in one: selecting text reliably.
+- capture mouse input to support selection inside the reader.
 
 ## Installation
 
@@ -78,6 +77,10 @@ When a directory is provided, MarkR recursively discovers files with the `.md`, 
 | `/` | Search the rendered document |
 | `Enter` / `Esc` while searching | Confirm / cancel the search |
 | `n` / `N` | Next / previous highlighted search match |
+| `v` | Start a keyboard selection in the reader |
+| `←` / `→`, `↑` / `↓`, `h` / `j` / `k` / `l` while selecting | Extend the selection |
+| `y` | Copy the selection to the clipboard |
+| Mouse drag in the reader | Select text with the mouse |
 | `?` | Open the quick guide |
 | `q` | Quit |
 
@@ -134,7 +137,6 @@ The short-term roadmap includes:
 
 - add terminal hyperlinks and lightweight document diagnostics;
 - improve performance for very large documents and workspaces;
-- add mouse-aware selection and clipboard support;
 - support more Markdown extensions where the terminal allows it;
 - explore editing and richer authoring workflows after the reader experience is solid.
 
