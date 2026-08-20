@@ -53,6 +53,7 @@ impl FromStr for ThemeName {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
     pub name: ThemeName,
+    /// Kept for Markdown layout and syntax compatibility. The shell itself uses Reset.
     pub background: Color,
     pub surface: Color,
     pub surface_active: Color,
@@ -62,6 +63,15 @@ pub struct Theme {
     pub link: Color,
     pub border: Color,
     pub code: Color,
+    pub reader_background: Color,
+    pub reader_border: Color,
+    pub chrome_text: Color,
+    pub chrome_muted: Color,
+    pub selection: Color,
+    pub accent_soft: Color,
+    pub error: Color,
+    pub warning: Color,
+    pub success: Color,
 }
 
 impl Default for Theme {
@@ -80,10 +90,19 @@ impl Theme {
                 surface_active: Color::Rgb(30, 30, 33),
                 text: Color::Rgb(232, 232, 232),
                 text_muted: Color::Rgb(137, 137, 143),
-                accent: Color::Rgb(232, 55, 64),
+                accent: Color::Rgb(242, 125, 38),
                 link: Color::Rgb(107, 174, 255),
                 border: Color::Rgb(53, 53, 59),
                 code: Color::Rgb(219, 180, 108),
+                reader_background: Color::Rgb(17, 17, 19),
+                reader_border: Color::Rgb(74, 74, 80),
+                chrome_text: Color::Rgb(232, 232, 232),
+                chrome_muted: Color::Rgb(137, 137, 143),
+                selection: Color::Rgb(44, 35, 28),
+                accent_soft: Color::Rgb(92, 57, 31),
+                error: Color::Rgb(255, 112, 91),
+                warning: Color::Rgb(244, 184, 76),
+                success: Color::Rgb(111, 208, 137),
             },
             ThemeName::Midnight => Self {
                 name,
@@ -92,10 +111,19 @@ impl Theme {
                 surface_active: Color::Rgb(22, 35, 52),
                 text: Color::Rgb(226, 232, 240),
                 text_muted: Color::Rgb(125, 141, 163),
-                accent: Color::Rgb(86, 182, 194),
+                accent: Color::Rgb(242, 125, 38),
                 link: Color::Rgb(114, 180, 255),
                 border: Color::Rgb(40, 58, 78),
                 code: Color::Rgb(222, 180, 110),
+                reader_background: Color::Rgb(12, 20, 32),
+                reader_border: Color::Rgb(61, 79, 101),
+                chrome_text: Color::Rgb(226, 232, 240),
+                chrome_muted: Color::Rgb(125, 141, 163),
+                selection: Color::Rgb(51, 43, 33),
+                accent_soft: Color::Rgb(92, 57, 31),
+                error: Color::Rgb(255, 126, 105),
+                warning: Color::Rgb(244, 184, 76),
+                success: Color::Rgb(111, 208, 137),
             },
             ThemeName::Paper => Self {
                 name,
@@ -104,10 +132,19 @@ impl Theme {
                 surface_active: Color::Rgb(221, 214, 201),
                 text: Color::Rgb(38, 36, 33),
                 text_muted: Color::Rgb(105, 99, 90),
-                accent: Color::Rgb(178, 48, 57),
+                accent: Color::Rgb(211, 93, 42),
                 link: Color::Rgb(40, 93, 153),
                 border: Color::Rgb(187, 178, 163),
                 code: Color::Rgb(142, 91, 35),
+                reader_background: Color::Rgb(255, 252, 246),
+                reader_border: Color::Rgb(187, 178, 163),
+                chrome_text: Color::Rgb(38, 36, 33),
+                chrome_muted: Color::Rgb(105, 99, 90),
+                selection: Color::Rgb(247, 224, 193),
+                accent_soft: Color::Rgb(247, 224, 193),
+                error: Color::Rgb(169, 45, 38),
+                warning: Color::Rgb(151, 101, 24),
+                success: Color::Rgb(41, 121, 73),
             },
         }
     }
@@ -124,11 +161,13 @@ impl Theme {
     }
 
     pub fn title(self) -> Style {
-        Style::default().fg(self.text).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.chrome_text)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn muted(self) -> Style {
-        Style::default().fg(self.text_muted)
+        Style::default().fg(self.chrome_muted)
     }
 
     pub fn accent(self) -> Style {

@@ -1,28 +1,165 @@
 use std::ops::Range;
+use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block as TuiBlock, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{
+    Block as TuiBlock, Borders, Clear, List, ListItem, ListState, Paragraph, Widget,
+};
 use ratatui_image::sliced::{SignedPosition, SlicedImage};
 
-use crate::app::{App, Focus, SidebarPanel};
+use crate::app::{App, Focus, ResponsiveMode, SidebarPanel};
 use crate::explorer::EntryKind;
 use crate::images::Asset;
 use crate::layout;
+use crate::theme::Theme;
+
+pub struct FloatingReader {
+    theme: Theme,
+    focused: bool,
+}
+
+impl FloatingReader {
+    pub fn new(theme: Theme, focused: bool) -> Self {
+        Self { theme, focused }
+    }
+
+    pub fn inner(area: Rect) -> Rect {
+        Rect::new(
+            area.x.saturating_add(3),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(5),
+            area.height.saturating_sub(2),
+        )
+    }
+}
+
+impl Widget for FloatingReader {
+    fn render(self, area: Rect, buffer: &mut ratatui::buffer::Buffer) {
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                let cell = &mut buffer[(x, y)];
+                cell.set_symbol(" ");
+                cell.set_fg(self.theme.text);
+                cell.set_bg(self.theme.reader_background);
+            }
+        }
+
+        let marker_start = area.y.saturating_add(2);
+        let marker_end = area.y.saturating_add(5).min(area.bottom());
+        let marker_color = if self.focused {
+            self.theme.accent
+        } else {
+            self.theme.reader_border
+        };
+        for y in marker_start..marker_end {
+            let cell = &mut buffer[(area.x, y)];
+            cell.set_symbol("▎");
+            cell.set_fg(marker_color);
+            cell.set_bg(self.theme.reader_background);
+        }
+    }
+}
+
+struct RoundedPanel {
+    theme: Theme,
+}
+
+impl RoundedPanel {
+    fn new(theme: Theme) -> Self {
+        Self { theme }
+    }
+
+    fn inner(area: Rect) -> Rect {
+        let border_inner = rounded_border_inner(area);
+        Rect::new(
+            border_inner.x.saturating_add(2),
+            border_inner.y,
+            border_inner.width.saturating_sub(4),
+            border_inner.height,
+        )
+    }
+}
+
+impl Widget for RoundedPanel {
+    fn render(self, area: Rect, buffer: &mut ratatui::buffer::Buffer) {
+        paint_rounded_surface(buffer, area, self.theme.reader_background);
+        render_rounded_border(buffer, area, self.theme.reader_border);
+    }
+}
+
+struct RoundedSidebar {
+    border: Color,
+}
+
+impl Widget for RoundedSidebar {
+    fn render(self, area: Rect, buffer: &mut ratatui::buffer::Buffer) {
+        render_rounded_border(buffer, area, self.border);
+    }
+}
+
+fn rounded_border_inner(area: Rect) -> Rect {
+    TuiBlock::default().borders(Borders::ALL).inner(area)
+}
+
+fn paint_rounded_surface(buffer: &mut ratatui::buffer::Buffer, area: Rect, background: Color) {
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            buffer[(x, y)].set_bg(Color::Reset);
+        }
+    }
+
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+
+    let last_x = area.right().saturating_sub(1);
+    let last_y = area.bottom().saturating_sub(1);
+    for x in area.x.saturating_add(1)..last_x {
+        buffer[(x, area.y)].set_bg(background);
+        buffer[(x, last_y)].set_bg(background);
+    }
+    for y in area.y.saturating_add(1)..last_y {
+        for x in area.x..area.right() {
+            buffer[(x, y)].set_bg(background);
+        }
+    }
+}
+
+fn render_rounded_border(buffer: &mut ratatui::buffer::Buffer, area: Rect, border: Color) {
+    TuiBlock::default()
+        .borders(Borders::ALL)
+        .border_set(ratatui::symbols::border::ROUNDED)
+        .border_style(Style::default().fg(border))
+        .render(area, buffer);
+
+    if area.width >= 2 && area.height >= 2 {
+        for (x, y) in [
+            (area.x, area.y),
+            (area.right().saturating_sub(1), area.y),
+            (area.x, area.bottom().saturating_sub(1)),
+            (
+                area.right().saturating_sub(1),
+                area.bottom().saturating_sub(1),
+            ),
+        ] {
+            buffer[(x, y)].set_bg(Color::Reset);
+        }
+    }
+}
 
 pub fn render(frame: &mut Frame, app: &App) {
-    let theme = app.theme;
     frame.render_widget(
-        TuiBlock::default().style(Style::default().bg(theme.background)),
+        TuiBlock::default().style(Style::default().bg(Color::Reset)),
         frame.area(),
     );
 
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
@@ -32,7 +169,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_body(frame, app, vertical[1]);
     render_status(frame, app, vertical[2]);
 
-    if app.help_visible {
+    if app.help_visible || app.help_progress(Instant::now()) > 0.0 {
         render_help(frame, app);
     }
 }
@@ -49,38 +186,83 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         )
     };
     let title = Line::from(vec![
-        Span::styled("  MARKR", theme.accent()),
+        Span::styled("▰ MARKR", theme.accent()),
         Span::styled("  /  ", theme.muted()),
         Span::styled(app.workspace.display_name(), theme.title()),
-        Span::styled(format!("  {file_number}"), theme.muted()),
+        Span::styled(format!("  ·  {file_number}"), theme.muted()),
     ]);
     frame.render_widget(Paragraph::new(title), area);
 }
 
 fn render_body(frame: &mut Frame, app: &App, area: Rect) {
-    let theme = app.theme;
-    let chunks = if app.sidebar_visible {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(app.sidebar_width()), Constraint::Min(1)])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(1)])
-            .split(area)
-    };
-
-    if app.sidebar_visible {
-        render_sidebar(frame, app, chunks[0]);
+    let now = Instant::now();
+    if app.responsive_mode() == ResponsiveMode::Fullscreen && app.sidebar_visible {
+        clear_area(frame, area);
+        render_sidebar(frame, app, area);
+        return;
     }
 
-    let document_area = chunks[chunks.len() - 1];
-    let document_block = TuiBlock::default()
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(theme.border))
-        .padding(ratatui::widgets::Padding::horizontal(2));
-    let inner = document_block.inner(document_area);
+    let document_area = reader_area(app, area);
+    if document_area.width > 0 && document_area.height > 0 {
+        render_reader(frame, app, document_area);
+    }
+
+    if app.sidebar_visible || app.sidebar_progress(now) > 0.0 {
+        let sidebar_area = match app.responsive_mode() {
+            ResponsiveMode::Attached => Rect::new(
+                area.x,
+                area.y,
+                app.sidebar_width().min(area.width),
+                area.height,
+            ),
+            ResponsiveMode::Overlay => {
+                let width = ((f32::from(app.sidebar_width()) * app.sidebar_progress(now)) as u16)
+                    .max(1)
+                    .min(area.width);
+                Rect::new(area.x, area.y, width, area.height)
+            }
+            ResponsiveMode::Fullscreen => area,
+        };
+        if app.responsive_mode() != ResponsiveMode::Attached {
+            clear_area(frame, sidebar_area);
+        }
+        render_sidebar(frame, app, sidebar_area);
+    }
+}
+
+fn reader_area(app: &App, area: Rect) -> Rect {
+    if app.responsive_mode() == ResponsiveMode::Fullscreen && app.sidebar_visible {
+        return Rect::default();
+    }
+    let x = if app.responsive_mode() == ResponsiveMode::Attached && app.sidebar_visible {
+        area.x.saturating_add(app.sidebar_width().saturating_add(1))
+    } else {
+        area.x
+    };
+    let width = area.width.saturating_sub(x.saturating_sub(area.x));
+    let horizontal_gutter = if area.width < 72 { 0 } else { 1 };
+    Rect::new(
+        x.saturating_add(horizontal_gutter),
+        area.y,
+        width.saturating_sub(horizontal_gutter.saturating_mul(2)),
+        area.height,
+    )
+}
+
+fn clear_area(frame: &mut Frame, area: Rect) {
+    frame.render_widget(
+        TuiBlock::default().style(Style::default().bg(Color::Reset)),
+        area,
+    );
+}
+
+fn render_reader(frame: &mut Frame, app: &App, document_area: Rect) {
+    let theme = app.theme;
+    frame.render_widget(
+        FloatingReader::new(theme, app.focus == Focus::Document),
+        document_area,
+    );
+    let inner = FloatingReader::inner(document_area);
     let start = app.scroll.min(app.document_layout.lines.len());
     let end = start.saturating_add(usize::from(inner.height));
     let visible_lines = app.document_layout.lines[start..end.min(app.document_layout.lines.len())]
@@ -101,9 +283,8 @@ fn render_body(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect::<Vec<_>>();
     let paragraph = Paragraph::new(Text::from(visible_lines))
-        .style(Style::default().fg(theme.text).bg(theme.background))
-        .block(document_block);
-    frame.render_widget(paragraph, document_area);
+        .style(Style::default().fg(theme.text).bg(theme.reader_background));
+    frame.render_widget(paragraph, inner);
 
     let content_width = usize::from(inner.width).min(layout::MAX_CONTENT_WIDTH);
     let image_regions: Vec<(String, usize)> = app
@@ -127,9 +308,37 @@ fn render_body(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        RoundedSidebar {
+            border: app.theme.reader_border,
+        },
+        area,
+    );
+    let inner = rounded_border_inner(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let tabs = Line::from(vec![
+        Span::styled(" OUTLINE ", sidebar_tab_style(app, SidebarPanel::Outline)),
+        Span::raw(" "),
+        Span::styled(" FILES ", sidebar_tab_style(app, SidebarPanel::Files)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(tabs),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    let list_area = Rect::new(
+        inner.x,
+        inner.y.saturating_add(1),
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
     match app.sidebar_panel {
-        SidebarPanel::Outline => render_outline(frame, app, area),
-        SidebarPanel::Files => render_files(frame, app, area),
+        SidebarPanel::Outline => render_outline(frame, app, list_area),
+        SidebarPanel::Files => render_files(frame, app, list_area),
     }
 }
 
@@ -148,44 +357,40 @@ fn render_outline(frame: &mut Frame, app: &App, area: Rect) {
             .map(|(index, heading)| {
                 let indent = "  ".repeat(heading.level.saturating_sub(1) as usize);
                 let marker = if index == app.outline_selected {
-                    "◆ "
+                    "▌ "
                 } else {
                     "· "
                 };
-                let style = if index == app.outline_selected && app.focus == Focus::Sidebar {
-                    Style::default()
-                        .fg(theme.text)
-                        .bg(theme.surface_active)
-                        .add_modifier(Modifier::BOLD)
+                let style = if index == app.outline_selected {
+                    let mut style = Style::default().fg(if app.focus == Focus::Sidebar {
+                        theme.chrome_text
+                    } else {
+                        theme.chrome_muted
+                    });
+                    if app.focus == Focus::Sidebar {
+                        style = style.bg(theme.selection).add_modifier(Modifier::BOLD);
+                    }
+                    style
                 } else {
-                    Style::default().fg(theme.text_muted)
+                    Style::default().fg(theme.chrome_muted)
                 };
-                ListItem::new(Line::from(Span::styled(
-                    format!("{marker}{indent}{}", heading.title),
-                    style,
-                )))
+                let marker_style = if index == app.outline_selected {
+                    style.fg(theme.accent)
+                } else {
+                    style
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(marker, marker_style),
+                    Span::styled(format!("{indent}{}", heading.title), style),
+                ]))
             })
             .collect()
     };
 
-    let border_style = if app.focus == Focus::Sidebar && app.sidebar_panel == SidebarPanel::Outline
-    {
-        Style::default().fg(theme.accent)
-    } else {
-        Style::default().fg(theme.border)
-    };
-    let list = List::new(items)
-        .style(Style::default().bg(theme.surface))
-        .block(
-            TuiBlock::default()
-                .title(Line::from(vec![
-                    Span::styled(" OUTLINE ", sidebar_tab_style(app, SidebarPanel::Outline)),
-                    Span::styled(" FILES ", sidebar_tab_style(app, SidebarPanel::Files)),
-                ]))
-                .borders(Borders::ALL)
-                .border_style(border_style),
-        );
-    frame.render_widget(list, area);
+    let list = List::new(items).style(Style::default().bg(Color::Reset));
+    let mut state = ListState::default()
+        .with_selected((!app.document.outline.is_empty()).then_some(app.outline_selected));
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_files(frame: &mut Frame, app: &App, area: Rect) {
@@ -199,14 +404,19 @@ fn render_files(frame: &mut Frame, app: &App, area: Rect) {
         app.file_explorer
             .entries()
             .iter()
-            .map(|entry| {
+            .enumerate()
+            .map(|(index, entry)| {
                 let active = app.workspace.active_path() == Some(entry.path.as_path());
-                let marker = match entry.kind {
-                    EntryKind::Parent => "↰ ",
-                    EntryKind::Directory => "▸ ",
-                    EntryKind::Markdown if active => "● ",
-                    EntryKind::Markdown => "◇ ",
-                    EntryKind::File => "· ",
+                let marker = if index == app.file_explorer.selected() {
+                    "▌ "
+                } else {
+                    match entry.kind {
+                        EntryKind::Parent => "↰ ",
+                        EntryKind::Directory => "▸ ",
+                        EntryKind::Markdown if active => "● ",
+                        EntryKind::Markdown => "◇ ",
+                        EntryKind::File => "· ",
+                    }
                 };
                 let suffix = matches!(entry.kind, EntryKind::Directory).then_some("/");
                 let style = if active {
@@ -216,61 +426,49 @@ fn render_files(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Style::default().fg(theme.text_muted)
                 };
-                ListItem::new(Line::from(Span::styled(
-                    format!("{marker}{}{}", entry.name, suffix.unwrap_or_default()),
-                    style,
-                )))
+                let marker_style = if index == app.file_explorer.selected() {
+                    style.fg(theme.accent)
+                } else {
+                    style
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(marker, marker_style),
+                    Span::styled(
+                        format!("{}{}", entry.name, suffix.unwrap_or_default()),
+                        style,
+                    ),
+                ]))
             })
             .collect()
     };
 
-    let border_style = if app.focus == Focus::Sidebar && app.sidebar_panel == SidebarPanel::Files {
-        Style::default().fg(theme.accent)
-    } else {
-        Style::default().fg(theme.border)
-    };
-    let block = TuiBlock::default()
-        .title(Line::from(vec![
-            Span::styled(" OUTLINE ", sidebar_tab_style(app, SidebarPanel::Outline)),
-            Span::styled(" FILES ", sidebar_tab_style(app, SidebarPanel::Files)),
-        ]))
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .style(Style::default().bg(theme.surface));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1)])
-        .split(inner);
-    let directory = Text::from(vec![
-        Line::from(Span::styled(
-            format!(" {}", app.file_explorer.directory().display()),
-            theme.title(),
-        )),
-        Line::from(Span::styled(
-            " h parent · l open · r refresh",
-            theme.muted(),
-        )),
-    ]);
-    frame.render_widget(Paragraph::new(directory), chunks[0]);
-
+    let directory = Paragraph::new(Line::from(Span::styled(
+        format!(" {}", app.file_explorer.directory().display()),
+        theme.title(),
+    )));
+    let directory_area = Rect::new(area.x, area.y, area.width, area.height.min(1));
+    frame.render_widget(directory, directory_area);
+    let list_area = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    );
     let highlight_style = if app.focus == Focus::Sidebar {
         Style::default()
-            .fg(theme.text)
-            .bg(theme.surface_active)
+            .fg(theme.chrome_text)
+            .bg(theme.selection)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
     let list = List::new(items)
-        .style(Style::default().bg(theme.surface))
+        .style(Style::default().bg(Color::Reset))
         .highlight_style(highlight_style);
     let mut state = ListState::default().with_selected(
         (!app.file_explorer.entries().is_empty()).then_some(app.file_explorer.selected()),
     );
-    frame.render_stateful_widget(list, chunks[1], &mut state);
+    frame.render_stateful_widget(list, list_area, &mut state);
 }
 
 fn highlight_search_line(
@@ -333,7 +531,10 @@ fn highlight_search_line(
 
 fn sidebar_tab_style(app: &App, panel: SidebarPanel) -> Style {
     if app.sidebar_panel == panel {
-        app.theme.accent()
+        Style::default()
+            .fg(app.theme.accent)
+            .bg(app.theme.accent_soft)
+            .add_modifier(Modifier::BOLD)
     } else {
         app.theme.muted()
     }
@@ -343,15 +544,15 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme;
     let left = if let Some(input) = &app.search_input {
         Line::from(vec![
-            Span::styled("  /", theme.accent()),
+            Span::styled("/", theme.accent()),
             Span::styled(input, theme.text),
-            Span::styled("  Enter search  Esc cancel", theme.muted()),
+            Span::styled("  Enter search · Esc cancel", theme.muted()),
         ])
-    } else if let Some(error) = &app.error {
-        Line::from(Span::styled(format!("  {error}"), theme.accent()))
+    } else if let Some(message) = app.temporary_message(Instant::now()) {
+        Line::from(Span::styled(message, theme.accent()))
     } else if let Some((current, total)) = app.search_result_position() {
         Line::from(vec![
-            Span::styled(format!("  /{}", app.search_query), theme.accent()),
+            Span::styled(format!("/{}", app.search_query), theme.accent()),
             Span::styled(format!("  {current}/{total}  "), theme.muted()),
             Span::styled("n", theme.accent()),
             Span::styled(" next  ", theme.muted()),
@@ -360,23 +561,22 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         ])
     } else if !app.search_query.is_empty() {
         Line::from(vec![
-            Span::styled(format!("  /{}", app.search_query), theme.accent()),
+            Span::styled(format!("/{}", app.search_query), theme.accent()),
             Span::styled("  no matches  ", theme.muted()),
             Span::styled("/", theme.accent()),
             Span::styled(" edit", theme.muted()),
         ])
     } else if app.focus == Focus::Sidebar && app.sidebar_panel == SidebarPanel::Files {
         Line::from(vec![
-            Span::styled("  h/←", theme.accent()),
+            Span::styled("h/⌫", theme.accent()),
             Span::styled(" parent  ", theme.muted()),
-            Span::styled("l/→/Enter", theme.accent()),
+            Span::styled("l/Enter", theme.accent()),
             Span::styled(" open  ", theme.muted()),
             Span::styled("r", theme.accent()),
             Span::styled(" refresh", theme.muted()),
         ])
     } else {
         Line::from(vec![
-            Span::styled("  ", theme.muted()),
             Span::styled("TAB", theme.accent()),
             Span::styled(" focus  ", theme.muted()),
             Span::styled("?", theme.accent()),
@@ -385,31 +585,53 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(" quit", theme.muted()),
         ])
     };
-    let right = Span::styled(format!("MarkR · {} theme  ", theme.name), theme.muted());
-    let mut spans = left.spans;
-    spans.push(Span::raw(" "));
-    spans.push(right);
-    let line = Line::from(spans);
-    frame.render_widget(Paragraph::new(line).alignment(Alignment::Right), area);
+    let file_number = if app.workspace.files.is_empty() {
+        "stdin".to_string()
+    } else {
+        format!(
+            "{}/{}",
+            app.workspace.selected + 1,
+            app.workspace.files.len()
+        )
+    };
+    let right = if let Some((current, total)) = app.search_result_position() {
+        format!("search {current}/{total} · {file_number}")
+    } else {
+        format!("{} · line {}", file_number, app.scroll.saturating_add(1))
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(68), Constraint::Min(1)])
+        .split(area);
+    frame.render_widget(Paragraph::new(left), chunks[0]);
+    frame.render_widget(
+        Paragraph::new(Span::styled(right, theme.muted())).alignment(Alignment::Right),
+        chunks[1],
+    );
 }
 
 fn render_help(frame: &mut Frame, app: &App) {
-    let area = centered_rect(60, 60, frame.area());
+    let progress = app.help_progress(Instant::now());
+    let width = 40 + (20.0 * progress) as u16;
+    let height = 40 + (20.0 * progress) as u16;
+    let area = centered_rect(width, height, frame.area());
     let theme = app.theme;
     let text = Text::from(vec![
         Line::from(Span::styled(" MARKR / QUICK GUIDE ", theme.accent())),
         Line::default(),
         Line::from(" ↑↓ / j k     navigate document or sidebar"),
         Line::from(" Tab           switch sidebar/document focus"),
-        Line::from(" Enter         open outline section"),
+        Line::from(" Enter         open or activate selection"),
+        Line::from(" ← / →         switch Outline / Files"),
+        Line::from(" Backspace     parent directory"),
         Line::from(" [ / ]         previous / next document"),
         Line::from(" g / G         top / bottom"),
         Line::from(" Ctrl-u/d       page up / down"),
         Line::from(" t              toggle outline"),
         Line::from(" T              cycle color theme"),
         Line::from(" 1 / 2          outline / files panel"),
-        Line::from(" Enter / l / →  open file or directory"),
-        Line::from(" h / ←          explorer parent directory"),
+        Line::from(" Enter / l      open file or directory"),
+        Line::from(" h / Backspace  explorer parent directory"),
         Line::from(" r              refresh explorer"),
         Line::from(" /              search rendered text"),
         Line::from(" n / N          next / previous match"),
@@ -418,15 +640,10 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from(Span::styled(" Press any key to return ", theme.muted())),
     ]);
     frame.render_widget(Clear, area);
+    frame.render_widget(RoundedPanel::new(theme), area);
     frame.render_widget(
-        Paragraph::new(text)
-            .style(Style::default().fg(theme.text).bg(theme.surface))
-            .block(
-                TuiBlock::default()
-                    .borders(Borders::ALL)
-                    .border_style(theme.accent()),
-            ),
-        area,
+        Paragraph::new(text).style(Style::default().fg(theme.text).bg(theme.reader_background)),
+        RoundedPanel::inner(area),
     );
 }
 
@@ -479,15 +696,16 @@ fn image_position(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Instant;
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use ratatui::style::{Modifier, Style};
+    use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui_image::picker::{Picker, ProtocolType};
 
-    use super::{highlight_search_line, image_position};
+    use super::{FloatingReader, highlight_search_line, image_position};
     use crate::app::{App, Message};
     use crate::images::Asset;
     use crate::theme::Theme;
@@ -538,6 +756,82 @@ mod tests {
     }
 
     #[test]
+    fn floating_reader_is_a_borderless_island_with_an_editorial_marker() {
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(20, 10)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(FloatingReader::new(theme, true), Rect::new(2, 2, 12, 6));
+            })
+            .expect("render reader");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(2, 2)].symbol(), " ");
+        assert_eq!(buffer[(13, 2)].symbol(), " ");
+        assert_eq!(buffer[(2, 7)].symbol(), " ");
+        assert_eq!(buffer[(13, 7)].symbol(), " ");
+        assert_eq!(buffer[(2, 2)].bg, theme.reader_background);
+        assert_eq!(buffer[(13, 7)].bg, theme.reader_background);
+        assert_eq!(buffer[(5, 4)].bg, theme.reader_background);
+        assert_eq!(buffer[(2, 4)].symbol(), "▎");
+        assert_eq!(buffer[(2, 4)].fg, theme.accent);
+        assert_eq!(buffer[(2, 4)].bg, theme.reader_background);
+        assert_eq!(buffer[(14, 3)].symbol(), " ");
+        assert_eq!(buffer[(14, 3)].bg, Color::Reset);
+        assert_eq!(buffer[(3, 8)].symbol(), " ");
+        assert_eq!(buffer[(3, 8)].bg, Color::Reset);
+    }
+
+    #[test]
+    fn shell_keeps_external_cells_on_the_terminal_background() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| super::render(frame, &app))
+            .expect("render shell");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].bg, Color::Reset);
+        assert_eq!(buffer[(31, 2)].bg, Color::Reset);
+        assert_eq!(buffer[(0, 1)].symbol(), "╭");
+        assert_eq!(buffer[(29, 1)].symbol(), "╮");
+        assert_eq!(buffer[(0, 38)].symbol(), "╰");
+        assert_eq!(buffer[(29, 38)].symbol(), "╯");
+        assert_eq!(buffer[(0, 1)].bg, Color::Reset);
+        assert_eq!(buffer[(32, 1)].bg, Theme::default().reader_background);
+        assert_eq!(buffer[(35, 2)].bg, Theme::default().reader_background);
+        assert_eq!(buffer[(119, 1)].bg, Color::Reset);
+        assert_eq!(buffer[(119, 1)].symbol(), " ");
+        assert_eq!(buffer[(32, 3)].symbol(), "▎");
+        assert_eq!(buffer[(32, 3)].fg, Theme::default().accent);
+    }
+
+    #[test]
+    fn renders_attached_overlay_and_fullscreen_dimensions() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
+        for (width, height) in [(120, 40), (84, 30), (60, 24)] {
+            app.update(Message::Resize {
+                width,
+                height,
+                at: Instant::now(),
+            });
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| super::render(frame, &app))
+                .expect("render responsive shell");
+        }
+    }
+
+    #[test]
     fn renders_every_document_position_without_panicking() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
         let workspace = Workspace::open(Some(path), true).expect("README workspace");
@@ -545,6 +839,7 @@ mod tests {
         app.update(Message::Resize {
             width: 120,
             height: 40,
+            at: Instant::now(),
         });
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
 
@@ -566,6 +861,7 @@ mod tests {
         app.update(Message::Resize {
             width: 120,
             height: 40,
+            at: Instant::now(),
         });
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
 
@@ -587,6 +883,7 @@ mod tests {
         app.update(Message::Resize {
             width: 120,
             height: 40,
+            at: Instant::now(),
         });
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
 
@@ -608,6 +905,7 @@ mod tests {
         app.update(Message::Resize {
             width: 120,
             height: 40,
+            at: Instant::now(),
         });
         let region = app
             .document_layout
