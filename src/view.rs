@@ -587,12 +587,12 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         ])
     } else {
         Line::from(vec![
+            Span::styled("/", theme.accent()),
+            Span::styled(" search  ", theme.muted()),
             Span::styled("TAB", theme.accent()),
             Span::styled(" focus  ", theme.muted()),
             Span::styled("?", theme.accent()),
-            Span::styled(" help  ", theme.muted()),
-            Span::styled("q", theme.accent()),
-            Span::styled(" quit", theme.muted()),
+            Span::styled(" help", theme.muted()),
         ])
     };
     let file_number = if app.workspace.files.is_empty() {
