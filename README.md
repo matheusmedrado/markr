@@ -25,6 +25,7 @@ The current version can:
 - reload the active document when it changes on disk;
 - switch between documents without leaving the workspace;
 - search the rendered document with visible highlights for every match and a distinct active result;
+- start with one of three built-in color themes and switch palettes without restarting;
 - use familiar arrow-key controls alongside a small set of vim-inspired shortcuts;
 - preserve the terminal emulator's native text selection and copying.
 
@@ -45,6 +46,12 @@ cargo run -- ./docs
 cat README.md | cargo run
 ```
 
+MarkR ships with `markr`, `midnight` and `paper`. Choose one when opening the app, or press `T` whenever the walls need repainting:
+
+```bash
+cargo run -- --theme midnight README.md
+```
+
 When a directory is provided, MarkR recursively discovers files with the `.md`, `.markdown` and `.mdown` extensions and starts with the first one in sorted order.
 
 ## Controls
@@ -58,6 +65,7 @@ When a directory is provided, MarkR recursively discovers files with the `.md`, 
 | `g` / `G` | Go to the top / bottom |
 | `Ctrl-u` / `Ctrl-d` | Page up / down |
 | `t` | Toggle the outline sidebar |
+| `T` | Cycle through the built-in color themes |
 | `1` / `2` | Switch between outline and files |
 | `Enter`, `l` or `→` in Files | Enter a directory or open the selected Markdown file |
 | `h` or `←` in Files | Go to the parent directory |
@@ -74,7 +82,7 @@ The controls are intentionally small. MarkR may borrow a few ideas from modal ed
 
 MarkR aims for a terminal workspace with the atmosphere of a carefully configured editor:
 
-- a calm dark surface with restrained accent colors;
+- calm dark and light palettes with restrained accent colors;
 - generous spacing and clear document hierarchy;
 - an outline that makes large documents feel smaller;
 - subtle borders and symbols instead of visual noise;
@@ -104,18 +112,17 @@ layout and styled terminal lines
 ratatui view
 ```
 
-This separation gives the project room to grow into themes, editing, richer workspace navigation and integrations without turning the event loop into a cupboard full of mystery wires.
+This separation gives the project room to grow into editing, richer workspace navigation and integrations without turning the event loop into a cupboard full of mystery wires.
 
 ## Roadmap
 
 The short-term roadmap includes:
 
-- improve wrapping and viewport-aware outline jumps;
-- add syntax highlighting for fenced code;
+- add terminal hyperlinks and lightweight document diagnostics;
+- improve performance for very large documents and workspaces;
 - add mouse-aware selection and clipboard support;
-- add configurable themes and terminal hyperlinks;
 - support more Markdown extensions where the terminal allows it;
-- explore editing and assisted documentation workflows after the reader experience is solid.
+- explore editing and richer authoring workflows after the reader experience is solid.
 
 The reader comes first. A tool that cannot make reading pleasant has no business trying to become an editor, or a small operating system with a Markdown hobby.
 

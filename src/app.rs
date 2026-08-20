@@ -10,7 +10,7 @@ use crate::explorer::{Activation, FileExplorer};
 use crate::images::ImageStore;
 use crate::layout;
 use crate::markdown::Document;
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeName};
 use crate::workspace::Workspace;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +65,7 @@ pub struct App {
 
 #[derive(Debug, PartialEq, Eq)]
 struct UiSnapshot {
+    theme: ThemeName,
     focus: Focus,
     sidebar_panel: SidebarPanel,
     scroll: usize,
@@ -83,14 +84,17 @@ struct UiSnapshot {
 }
 
 impl App {
-    pub fn new(workspace: Workspace, picker: Picker) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        workspace: Workspace,
+        picker: Picker,
+        theme: Theme,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let file_explorer = FileExplorer::open(workspace.explorer_start_directory()?)?;
         let document = Document::parse(&workspace.reload_content()?);
         let last_modified = modified_time(workspace.active_path());
         let document_dir = document_dir(&workspace);
         let mut images = ImageStore::new(picker);
         images.load(document_dir.as_deref(), &document);
-        let theme = Theme::default();
         let terminal_width: u16 = 120;
         let document_width = terminal_width.saturating_sub(33).saturating_sub(5);
         let document_layout = layout::build(&document, document_width, theme, &images);
@@ -167,8 +171,9 @@ impl App {
             Message::Key(key) => {
                 let before = self.ui_snapshot();
                 let previous_width = self.document_width();
+                let previous_theme = self.theme;
                 self.handle_key(key);
-                if self.document_width() != previous_width {
+                if self.document_width() != previous_width || self.theme != previous_theme {
                     self.rebuild_layout();
                 }
                 self.clamp_scroll();
@@ -191,6 +196,7 @@ impl App {
 
     fn ui_snapshot(&self) -> UiSnapshot {
         UiSnapshot {
+            theme: self.theme.name,
             focus: self.focus,
             sidebar_panel: self.sidebar_panel,
             scroll: self.scroll,
@@ -237,6 +243,7 @@ impl App {
             KeyCode::Char('n') => self.next_search_match(),
             KeyCode::Char('N') => self.previous_search_match(),
             KeyCode::Char('t') => self.sidebar_visible = !self.sidebar_visible,
+            KeyCode::Char('T') => self.theme = self.theme.next(),
             KeyCode::Char('1') => self.select_sidebar_panel(SidebarPanel::Outline),
             KeyCode::Char('2') => self.select_sidebar_panel(SidebarPanel::Files),
             KeyCode::Tab => self.focus = toggle_focus(self.focus),
@@ -599,12 +606,13 @@ mod tests {
     use ratatui_image::picker::Picker;
 
     use super::{App, Message, SearchMatch, find_matches};
+    use crate::theme::{Theme, ThemeName};
     use crate::workspace::Workspace;
 
     fn readme_app() -> App {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
         let workspace = Workspace::open(Some(path), true).expect("README workspace");
-        App::new(workspace, Picker::halfblocks()).expect("app")
+        App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app")
     }
 
     fn key(code: KeyCode) -> Message {
@@ -704,5 +712,16 @@ mod tests {
         assert!(!app.should_quit());
         assert!(app.update(key(KeyCode::Char('q'))));
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn cycles_the_theme_and_rebuilds_the_document_layout() {
+        let mut app = readme_app();
+        let original_layout = app.document_layout.lines.clone();
+
+        assert!(app.update(key(KeyCode::Char('T'))));
+
+        assert_eq!(app.theme.name, ThemeName::Midnight);
+        assert_ne!(app.document_layout.lines, original_layout);
     }
 }
