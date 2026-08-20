@@ -13,6 +13,7 @@ pub struct DocumentLayout {
     pub lines: Vec<Line<'static>>,
     pub heading_lines: Vec<usize>,
     pub image_regions: Vec<ImageRegion>,
+    pub content_margin: usize,
 }
 
 #[derive(Debug)]
@@ -154,6 +155,7 @@ pub fn build(document: &Document, width: u16, theme: Theme, images: &ImageStore)
         lines,
         heading_lines,
         image_regions,
+        content_margin: margin,
     }
 }
 

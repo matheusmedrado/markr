@@ -4,6 +4,7 @@ mod explorer;
 mod images;
 mod layout;
 mod markdown;
+mod selection;
 mod syntax;
 mod theme;
 mod view;
@@ -19,6 +20,7 @@ use crossterm::event::{
     self as terminal_event, Event as CrosstermEvent, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -83,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
+    execute!(terminal.backend_mut(), EnableMouseCapture)?;
     let size = terminal.size()?;
     let mut app = App::new(workspace, picker, Theme::new(cli.theme))?;
     app.update(Message::Resize {
@@ -150,6 +153,7 @@ struct TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let mut stdout = io::stdout();
+        let _ = execute!(stdout, DisableMouseCapture);
         if self.keyboard_enhancement {
             let _ = execute!(stdout, PopKeyboardEnhancementFlags);
         }

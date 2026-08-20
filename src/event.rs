@@ -11,6 +11,10 @@ pub fn map_event(event: Event) -> Option<Message> {
                 at: Instant::now(),
             })
         }
+        Event::Mouse(mouse) => Some(Message::Mouse {
+            event: mouse,
+            at: Instant::now(),
+        }),
         _ => None,
     }
 }
