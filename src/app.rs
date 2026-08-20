@@ -476,8 +476,9 @@ impl App {
             KeyCode::Enter if self.focus == Focus::Sidebar => self.activate_sidebar_selection(at),
             KeyCode::Esc => {
                 self.set_help_visible(false, at);
-                self.search_input = None;
-                if self.focus == Focus::Sidebar {
+                if self.search_input.is_some() || !self.search_query.is_empty() {
+                    self.cancel_search();
+                } else if self.focus == Focus::Sidebar {
                     self.focus = Focus::Document;
                     if self.responsive_mode != ResponsiveMode::Attached {
                         self.set_sidebar_visible(false, at);
@@ -490,7 +491,7 @@ impl App {
 
     fn handle_search_input(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc => self.search_input = None,
+            KeyCode::Esc => self.cancel_search(),
             KeyCode::Enter => self.confirm_search(),
             KeyCode::Backspace => {
                 if let Some(input) = self.search_input.as_mut() {
@@ -504,6 +505,13 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn cancel_search(&mut self) {
+        self.search_input = None;
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.search_selected = 0;
     }
 
     fn confirm_search(&mut self) {
@@ -957,6 +965,26 @@ mod tests {
         assert!(!app.should_quit());
         assert!(app.update(key(KeyCode::Char('q'))));
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn escape_cancels_active_search() {
+        let mut app = readme_app();
+
+        app.update(key(KeyCode::Char('/')));
+        assert!(app.search_input.is_some());
+
+        app.update(key(KeyCode::Char('m')));
+        app.update(key(KeyCode::Char('a')));
+        app.update(key(KeyCode::Char('r')));
+        app.update(key(KeyCode::Enter));
+        assert!(!app.search_query.is_empty());
+        assert!(!app.search_matches.is_empty());
+
+        app.update(key(KeyCode::Esc));
+        assert!(app.search_input.is_none());
+        assert!(app.search_query.is_empty());
+        assert!(app.search_matches.is_empty());
     }
 
     #[test]
