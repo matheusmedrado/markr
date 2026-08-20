@@ -6,6 +6,8 @@
 
 Markdown deserves better than being opened in a browser tab called `final-final-v7.md`.
 
+*MarkR is being developed as part of a scientific research project (Iniciação Científica) for the Computer Science bachelor's degree at the Universidade Federal de Uberlândia (UFU).*
+
 MarkR is a terminal-first Markdown workspace for reading documentation with focus, structure and a little bit of personality. It is built in Rust with `ratatui` and `pulldown-cmark`, following The Elm Architecture from the first line of code.
 
 The goal is simple: make long-form Markdown feel good to read without leaving the terminal. The terminal is already where the work happens. The documentation can come along for the ride.
