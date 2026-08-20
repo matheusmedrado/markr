@@ -87,9 +87,9 @@ The controls are intentionally small. MarkR may borrow a few ideas from modal ed
 ## Design direction
 
 MarkR aims for a terminal workspace with the atmosphere of a carefully configured editor. The
-application chrome deliberately inherits the terminal's own background, including transparency and
-blur configured by the emulator. Only the Markdown reader, active selections, help and temporary
-messages use solid local surfaces:
+application uses a fully themed shell with distinct surfaces for the background, sidebar and reader.
+Rounded borders and restrained contrast keep the panels connected without making the terminal feel
+like a wall of boxes:
 
 - calm dark and light palettes with restrained accent colors;
 - generous spacing and clear document hierarchy;
@@ -97,9 +97,9 @@ messages use solid local surfaces:
 - subtle borders and symbols instead of visual noise;
 - familiar interactions before clever ones.
 
-The reader is a borderless solid island with one cell of breathing room on every side on medium and
-wide terminals. A short orange editorial marker indicates document focus without framing the whole
-surface or adding a simulated shadow over the terminal's native background.
+The reader is a rounded solid panel with one cell of breathing room on every side on medium and wide
+terminals. A short orange editorial marker indicates document focus, while the sidebar uses a quieter
+surface and border to keep navigation visually separate from the document.
 Below 100 columns the sidebar becomes an overlay; below 72 columns it becomes a temporary full-screen
 panel. Choose `markr` or `midnight` for dark terminal backgrounds and `paper` for light ones.
 

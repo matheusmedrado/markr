@@ -53,7 +53,7 @@ impl FromStr for ThemeName {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
     pub name: ThemeName,
-    /// Kept for Markdown layout and syntax compatibility. The shell itself uses Reset.
+    /// Base color for the themed shell and Markdown layout.
     pub background: Color,
     pub surface: Color,
     pub surface_active: Color,
