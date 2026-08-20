@@ -1,7 +1,7 @@
 use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_image::picker::Picker;
@@ -25,11 +25,61 @@ pub enum SidebarPanel {
     Files,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResponsiveMode {
+    Attached,
+    Overlay,
+    Fullscreen,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Transition {
+    from: f32,
+    to: f32,
+    started: Instant,
+    duration: Duration,
+}
+
+impl Transition {
+    fn new(value: f32, to: f32, started: Instant, duration: Duration) -> Self {
+        Self {
+            from: value,
+            to,
+            started,
+            duration,
+        }
+    }
+
+    fn value(self, at: Instant) -> f32 {
+        if self.duration.is_zero() {
+            return self.to;
+        }
+        let elapsed = at.saturating_duration_since(self.started);
+        let progress = (elapsed.as_secs_f32() / self.duration.as_secs_f32()).min(1.0);
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        self.from + (self.to - self.from) * eased
+    }
+
+    fn active(self, at: Instant) -> bool {
+        at.saturating_duration_since(self.started) < self.duration
+    }
+}
+
 #[derive(Debug)]
 pub enum Message {
-    Key(KeyEvent),
+    Key {
+        key: KeyEvent,
+        at: Instant,
+    },
     Tick,
-    Resize { width: u16, height: u16 },
+    Resize {
+        width: u16,
+        height: u16,
+        at: Instant,
+    },
+    Frame {
+        at: Instant,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,6 +109,14 @@ pub struct App {
     pub search_input: Option<String>,
     search_matches: Vec<SearchMatch>,
     search_selected: usize,
+    responsive_mode: ResponsiveMode,
+    sidebar_transition: Transition,
+    tab_transition: Transition,
+    selection_transition: Transition,
+    help_transition: Transition,
+    initial_started: Instant,
+    temporary_message: Option<(String, Instant)>,
+    message_started: Option<Instant>,
     last_modified: Option<SystemTime>,
     quit: bool,
 }
@@ -95,6 +153,7 @@ impl App {
         let document_dir = document_dir(&workspace);
         let mut images = ImageStore::new(picker);
         images.load(document_dir.as_deref(), &document);
+        let initial_started = Instant::now();
         let terminal_width: u16 = 120;
         let document_width = terminal_width.saturating_sub(33).saturating_sub(5);
         let document_layout = layout::build(&document, document_width, theme, &images);
@@ -118,6 +177,24 @@ impl App {
             search_input: None,
             search_matches: Vec::new(),
             search_selected: 0,
+            responsive_mode: ResponsiveMode::Attached,
+            sidebar_transition: Transition::new(
+                0.0,
+                1.0,
+                initial_started,
+                Duration::from_millis(200),
+            ),
+            tab_transition: Transition::new(0.0, 1.0, initial_started, Duration::from_millis(120)),
+            selection_transition: Transition::new(
+                0.0,
+                1.0,
+                initial_started,
+                Duration::from_millis(90),
+            ),
+            help_transition: Transition::new(0.0, 0.0, initial_started, Duration::ZERO),
+            initial_started,
+            temporary_message: None,
+            message_started: None,
             last_modified,
             quit: false,
         })
@@ -128,18 +205,12 @@ impl App {
     }
 
     pub fn document_width(&self) -> u16 {
-        let sidebar_width = if self.sidebar_visible {
-            self.sidebar_width()
-        } else {
-            0
-        };
-        self.terminal_width
-            .saturating_sub(sidebar_width)
-            .saturating_sub(5)
+        let reader_width = self.reader_outer_width();
+        reader_width.saturating_sub(5)
     }
 
     fn document_height(&self) -> usize {
-        usize::from(self.terminal_height.saturating_sub(3).max(1))
+        usize::from(self.terminal_height.saturating_sub(4).max(1))
     }
 
     fn max_scroll(&self) -> usize {
@@ -163,16 +234,116 @@ impl App {
     }
 
     pub fn sidebar_width(&self) -> u16 {
-        33
+        30
+    }
+
+    pub fn responsive_mode(&self) -> ResponsiveMode {
+        self.responsive_mode
+    }
+
+    pub fn sidebar_progress(&self, at: Instant) -> f32 {
+        self.sidebar_transition.value(at)
+    }
+
+    pub fn help_progress(&self, at: Instant) -> f32 {
+        self.help_transition.value(at)
+    }
+
+    pub fn animation_active(&self, at: Instant) -> bool {
+        at.saturating_duration_since(self.initial_started) < Duration::from_millis(220)
+            || self.sidebar_transition.active(at)
+            || self.tab_transition.active(at)
+            || self.selection_transition.active(at)
+            || self.help_transition.active(at)
+            || self.message_animation_active(at)
+    }
+
+    pub fn temporary_message(&self, at: Instant) -> Option<&str> {
+        self.temporary_message
+            .as_ref()
+            .filter(|(_, expires)| *expires > at)
+            .map(|(message, _)| message.as_str())
+    }
+
+    fn reader_outer_width(&self) -> u16 {
+        let gutter = if self.terminal_width < 72 { 0 } else { 1 };
+        match self.responsive_mode {
+            ResponsiveMode::Attached if self.sidebar_visible => self
+                .terminal_width
+                .saturating_sub(self.sidebar_width())
+                .saturating_sub(1)
+                .saturating_sub(gutter * 2),
+            ResponsiveMode::Fullscreen => 0,
+            _ => self.terminal_width.saturating_sub(gutter * 2),
+        }
+    }
+
+    fn set_sidebar_visible(&mut self, visible: bool, at: Instant) {
+        if self.sidebar_visible == visible {
+            return;
+        }
+        let current = self.sidebar_progress(at);
+        self.sidebar_visible = visible;
+        self.sidebar_transition = Transition::new(
+            current,
+            if visible { 1.0 } else { 0.0 },
+            at,
+            Duration::from_millis(160),
+        );
+    }
+
+    fn set_help_visible(&mut self, visible: bool, at: Instant) {
+        let current = self.help_progress(at);
+        self.help_visible = visible;
+        self.help_transition = Transition::new(
+            current,
+            if visible { 1.0 } else { 0.0 },
+            at,
+            Duration::from_millis(140),
+        );
+    }
+
+    fn set_message(&mut self, message: impl Into<String>, at: Instant) {
+        self.temporary_message = Some((message.into(), at + Duration::from_millis(1_600)));
+        self.message_started = Some(at);
+    }
+
+    fn message_animation_active(&self, at: Instant) -> bool {
+        let Some(started) = self.message_started else {
+            return false;
+        };
+        let Some((_, expires)) = &self.temporary_message else {
+            return false;
+        };
+        let entering = at < started + Duration::from_millis(150);
+        let exit_started = (*expires)
+            .checked_sub(Duration::from_millis(180))
+            .unwrap_or(*expires);
+        let exiting = at >= exit_started && at < *expires;
+        entering || exiting
+    }
+
+    fn update_responsive_mode(&mut self, at: Instant) {
+        let mode = match self.terminal_width {
+            0..=71 => ResponsiveMode::Fullscreen,
+            72..=99 => ResponsiveMode::Overlay,
+            _ => ResponsiveMode::Attached,
+        };
+        if mode != self.responsive_mode {
+            self.responsive_mode = mode;
+            if mode == ResponsiveMode::Fullscreen && self.focus == Focus::Document {
+                self.set_sidebar_visible(false, at);
+            }
+        }
     }
 
     pub fn update(&mut self, message: Message) -> bool {
         match message {
-            Message::Key(key) => {
+            Message::Key { key, at } => {
                 let before = self.ui_snapshot();
                 let previous_width = self.document_width();
                 let previous_theme = self.theme;
-                self.handle_key(key);
+                self.handle_key(key, at);
                 if self.document_width() != previous_width || self.theme != previous_theme {
                     self.rebuild_layout();
                 }
@@ -180,16 +351,29 @@ impl App {
                 before != self.ui_snapshot()
             }
             Message::Tick => self.reload_if_changed(),
-            Message::Resize { width, height } => {
+            Message::Resize { width, height, at } => {
                 if self.terminal_width == width && self.terminal_height == height {
                     return false;
                 }
                 self.terminal_width = width;
                 self.terminal_height = height;
+                self.update_responsive_mode(at);
                 self.rebuild_layout();
                 self.refresh_search();
                 self.clamp_scroll();
                 true
+            }
+            Message::Frame { at } => {
+                let was_active = self.animation_active(at);
+                if self
+                    .temporary_message
+                    .as_ref()
+                    .is_some_and(|(_, expires)| *expires <= at)
+                {
+                    self.temporary_message = None;
+                    self.message_started = None;
+                }
+                was_active
             }
         }
     }
@@ -215,7 +399,7 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) {
+    fn handle_key(&mut self, key: KeyEvent, at: Instant) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.quit = true;
             return;
@@ -226,7 +410,7 @@ impl App {
                 key.code,
                 KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
             ) {
-                self.help_visible = false;
+                self.set_help_visible(false, at);
             }
             return;
         }
@@ -238,41 +422,68 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('?') => self.help_visible = true,
+            KeyCode::Char('?') => self.set_help_visible(true, at),
             KeyCode::Char('/') => self.search_input = Some(self.search_query.clone()),
             KeyCode::Char('n') => self.next_search_match(),
             KeyCode::Char('N') => self.previous_search_match(),
-            KeyCode::Char('t') => self.sidebar_visible = !self.sidebar_visible,
-            KeyCode::Char('T') => self.theme = self.theme.next(),
-            KeyCode::Char('1') => self.select_sidebar_panel(SidebarPanel::Outline),
-            KeyCode::Char('2') => self.select_sidebar_panel(SidebarPanel::Files),
-            KeyCode::Tab => self.focus = toggle_focus(self.focus),
-            KeyCode::Left | KeyCode::Char('h')
-                if self.focus == Focus::Sidebar && self.sidebar_panel == SidebarPanel::Files =>
-            {
-                self.browse_parent()
+            KeyCode::Char('t') => self.set_sidebar_visible(!self.sidebar_visible, at),
+            KeyCode::Char('T') => {
+                self.theme = self.theme.next();
+                self.set_message(format!("theme: {}", self.theme.name), at);
             }
-            KeyCode::Right | KeyCode::Char('l')
+            KeyCode::Char('1') => self.select_sidebar_panel(SidebarPanel::Outline, at),
+            KeyCode::Char('2') => self.select_sidebar_panel(SidebarPanel::Files, at),
+            KeyCode::Tab => {
+                self.focus = toggle_focus(self.focus);
+                self.tab_transition = Transition::new(0.0, 1.0, at, Duration::from_millis(120));
+                if self.focus == Focus::Sidebar {
+                    self.set_sidebar_visible(true, at);
+                } else if self.responsive_mode != ResponsiveMode::Attached {
+                    self.set_sidebar_visible(false, at);
+                }
+            }
+            KeyCode::Left if self.focus == Focus::Sidebar => {
+                self.select_sidebar_panel(SidebarPanel::Outline, at)
+            }
+            KeyCode::Right if self.focus == Focus::Sidebar => {
+                self.select_sidebar_panel(SidebarPanel::Files, at)
+            }
+            KeyCode::Char('h') | KeyCode::Backspace
                 if self.focus == Focus::Sidebar && self.sidebar_panel == SidebarPanel::Files =>
             {
-                self.activate_explorer_entry()
+                self.browse_parent(at)
+            }
+            KeyCode::Char('l')
+                if self.focus == Focus::Sidebar && self.sidebar_panel == SidebarPanel::Files =>
+            {
+                self.activate_explorer_entry(at)
             }
             KeyCode::Char('r')
                 if self.focus == Focus::Sidebar && self.sidebar_panel == SidebarPanel::Files =>
             {
-                self.refresh_explorer()
+                self.refresh_explorer(at)
             }
             KeyCode::Char(']') => self.switch_file(true),
             KeyCode::Char('[') => self.switch_file(false),
-            KeyCode::Up | KeyCode::Char('k') => self.move_up(),
-            KeyCode::Down | KeyCode::Char('j') => self.move_down(),
+            KeyCode::Up | KeyCode::Char('k') => self.move_up(at),
+            KeyCode::Down | KeyCode::Char('j') => self.move_down(at),
             KeyCode::PageUp => self.page_up(),
             KeyCode::PageDown => self.page_down(),
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => self.page_up(),
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => self.page_down(),
             KeyCode::Char('g') => self.scroll = 0,
             KeyCode::Char('G') => self.scroll = usize::MAX,
-            KeyCode::Enter if self.focus == Focus::Sidebar => self.activate_sidebar_selection(),
+            KeyCode::Enter if self.focus == Focus::Sidebar => self.activate_sidebar_selection(at),
+            KeyCode::Esc => {
+                self.set_help_visible(false, at);
+                self.search_input = None;
+                if self.focus == Focus::Sidebar {
+                    self.focus = Focus::Document;
+                    if self.responsive_mode != ResponsiveMode::Attached {
+                        self.set_sidebar_visible(false, at);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -369,7 +580,7 @@ impl App {
         (!self.search_matches.is_empty()).then_some(self.search_selected)
     }
 
-    fn move_up(&mut self) {
+    fn move_up(&mut self, at: Instant) {
         match self.focus {
             Focus::Sidebar => match self.sidebar_panel {
                 SidebarPanel::Outline => {
@@ -379,9 +590,10 @@ impl App {
             },
             Focus::Document => self.scroll = self.scroll.saturating_sub(1),
         }
+        self.selection_transition = Transition::new(0.0, 1.0, at, Duration::from_millis(90));
     }
 
-    fn move_down(&mut self) {
+    fn move_down(&mut self, at: Instant) {
         match self.focus {
             Focus::Sidebar => match self.sidebar_panel {
                 SidebarPanel::Outline => {
@@ -396,6 +608,7 @@ impl App {
             },
             Focus::Document => self.scroll = self.scroll.saturating_add(1),
         }
+        self.selection_transition = Transition::new(0.0, 1.0, at, Duration::from_millis(90));
     }
 
     fn page_up(&mut self) {
@@ -417,32 +630,42 @@ impl App {
         }
     }
 
-    fn select_sidebar_panel(&mut self, panel: SidebarPanel) {
+    fn select_sidebar_panel(&mut self, panel: SidebarPanel, at: Instant) {
         self.sidebar_panel = panel;
-        self.sidebar_visible = true;
+        self.set_sidebar_visible(true, at);
+        self.tab_transition = Transition::new(0.0, 1.0, at, Duration::from_millis(120));
         self.focus = Focus::Sidebar;
     }
 
-    fn activate_sidebar_selection(&mut self) {
+    fn activate_sidebar_selection(&mut self, at: Instant) {
         match self.sidebar_panel {
             SidebarPanel::Outline => self.jump_to_selected_heading(),
-            SidebarPanel::Files => self.activate_explorer_entry(),
+            SidebarPanel::Files => self.activate_explorer_entry(at),
         }
     }
 
-    fn activate_explorer_entry(&mut self) {
+    fn activate_explorer_entry(&mut self, at: Instant) {
         match self.file_explorer.activate() {
-            Ok(Activation::Navigated) => self.error = None,
+            Ok(Activation::Navigated) => {
+                self.error = None;
+                self.set_message("directory opened", at);
+            }
             Ok(Activation::OpenMarkdown(path)) => self.open_explorer_file(&path),
             Ok(Activation::Unsupported(path)) => {
-                self.error = Some(format!(
+                let message = format!(
                     "{} is not a Markdown document",
                     path.file_name()
                         .map(|name| name.to_string_lossy())
                         .unwrap_or_default()
-                ));
+                );
+                self.error = Some(message.clone());
+                self.set_message(message, at);
             }
-            Err(error) => self.error = Some(format!("Cannot open directory: {error}")),
+            Err(error) => {
+                let message = format!("Cannot open directory: {error}");
+                self.error = Some(message.clone());
+                self.set_message(message, at);
+            }
         }
     }
 
@@ -455,21 +678,39 @@ impl App {
                 self.load_active_file();
                 self.focus = Focus::Document;
             }
-            Err(error) => self.error = Some(format!("Cannot open file: {error}")),
+            Err(error) => {
+                let message = format!("Cannot open file: {error}");
+                self.error = Some(message.clone());
+                self.set_message(message, Instant::now());
+            }
         }
     }
 
-    fn browse_parent(&mut self) {
+    fn browse_parent(&mut self, at: Instant) {
         match self.file_explorer.go_parent() {
-            Ok(_) => self.error = None,
-            Err(error) => self.error = Some(format!("Cannot open directory: {error}")),
+            Ok(_) => {
+                self.error = None;
+                self.set_message("parent directory", at);
+            }
+            Err(error) => {
+                let message = format!("Cannot open directory: {error}");
+                self.error = Some(message.clone());
+                self.set_message(message, at);
+            }
         }
     }
 
-    fn refresh_explorer(&mut self) {
+    fn refresh_explorer(&mut self, at: Instant) {
         match self.file_explorer.refresh() {
-            Ok(()) => self.error = None,
-            Err(error) => self.error = Some(format!("Cannot refresh directory: {error}")),
+            Ok(()) => {
+                self.error = None;
+                self.set_message("files reloaded", at);
+            }
+            Err(error) => {
+                let message = format!("Cannot refresh directory: {error}");
+                self.error = Some(message.clone());
+                self.set_message(message, at);
+            }
         }
     }
 
@@ -600,12 +841,13 @@ fn modified_time(path: Option<&Path>) -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Instant;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::text::Line;
     use ratatui_image::picker::Picker;
 
-    use super::{App, Message, SearchMatch, find_matches};
+    use super::{App, Focus, Message, ResponsiveMode, SearchMatch, SidebarPanel, find_matches};
     use crate::theme::{Theme, ThemeName};
     use crate::workspace::Workspace;
 
@@ -616,7 +858,10 @@ mod tests {
     }
 
     fn key(code: KeyCode) -> Message {
-        Message::Key(KeyEvent::new(code, KeyModifiers::NONE))
+        Message::Key {
+            key: KeyEvent::new(code, KeyModifiers::NONE),
+            at: Instant::now(),
+        }
     }
 
     #[test]
@@ -723,5 +968,97 @@ mod tests {
 
         assert_eq!(app.theme.name, ThemeName::Midnight);
         assert_ne!(app.document_layout.lines, original_layout);
+    }
+
+    #[test]
+    fn classifies_the_three_responsive_layouts() {
+        let mut app = readme_app();
+        let now = Instant::now();
+
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: now,
+        });
+        assert_eq!(app.responsive_mode(), ResponsiveMode::Attached);
+
+        app.update(Message::Resize {
+            width: 84,
+            height: 30,
+            at: now,
+        });
+        assert_eq!(app.responsive_mode(), ResponsiveMode::Overlay);
+
+        app.update(Message::Resize {
+            width: 60,
+            height: 24,
+            at: now,
+        });
+        assert_eq!(app.responsive_mode(), ResponsiveMode::Fullscreen);
+    }
+
+    #[test]
+    fn arrows_switch_sidebar_panels_and_tab_closes_compact_sidebar() {
+        let mut app = readme_app();
+        let now = Instant::now();
+
+        assert_eq!(app.focus, Focus::Document);
+        app.update(Message::Key {
+            key: KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            at: now,
+        });
+        assert_eq!(app.focus, Focus::Sidebar);
+        app.update(Message::Key {
+            key: KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            at: now,
+        });
+        assert_eq!(app.sidebar_panel, SidebarPanel::Files);
+        app.update(Message::Resize {
+            width: 84,
+            height: 30,
+            at: now,
+        });
+        app.update(Message::Key {
+            key: KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            at: now,
+        });
+        assert_eq!(app.focus, Focus::Document);
+        assert!(!app.sidebar_visible);
+    }
+
+    #[test]
+    fn transition_can_be_sampled_and_retargeted_without_a_queue() {
+        let start = Instant::now();
+        let transition =
+            super::Transition::new(0.0, 1.0, start, std::time::Duration::from_millis(100));
+        let middle = transition.value(start + std::time::Duration::from_millis(50));
+        assert!(middle > 0.0 && middle < 1.0);
+        assert_eq!(
+            transition.value(start + std::time::Duration::from_millis(100)),
+            1.0
+        );
+
+        let retargeted = super::Transition::new(
+            middle,
+            0.0,
+            start + std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(100),
+        );
+        assert_eq!(
+            retargeted.value(start + std::time::Duration::from_millis(50)),
+            middle
+        );
+        assert_eq!(
+            retargeted.value(start + std::time::Duration::from_millis(200)),
+            0.0
+        );
+    }
+
+    #[test]
+    fn animation_polling_stops_after_all_transitions_settle() {
+        let app = readme_app();
+        assert!(
+            !app.animation_active(app.initial_started + std::time::Duration::from_millis(1_000))
+        );
     }
 }

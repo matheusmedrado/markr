@@ -1,11 +1,15 @@
 use crossterm::event::{Event, KeyEventKind};
+use std::time::Instant;
 
 use crate::app::Message;
 
 pub fn map_event(event: Event) -> Option<Message> {
     match event {
         Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-            Some(Message::Key(key))
+            Some(Message::Key {
+                key,
+                at: Instant::now(),
+            })
         }
         _ => None,
     }

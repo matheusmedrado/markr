@@ -11,7 +11,7 @@ mod workspace;
 
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use crossterm::cursor::Show;
@@ -34,6 +34,7 @@ use crate::theme::{Theme, ThemeName};
 use crate::workspace::Workspace;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(150);
+const ANIMATION_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const MAX_EVENTS_PER_FRAME: usize = 64;
 
 #[derive(Debug, Parser)]
@@ -87,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.update(Message::Resize {
         width: size.width,
         height: size.height,
+        at: Instant::now(),
     });
 
     run(&mut terminal, &mut app)
@@ -100,7 +102,13 @@ fn run(
 
     while !app.should_quit() {
         let mut redraw = false;
-        if terminal_event::poll(EVENT_POLL_INTERVAL)? {
+        let now = Instant::now();
+        let poll_interval = if app.animation_active(now) {
+            ANIMATION_POLL_INTERVAL
+        } else {
+            EVENT_POLL_INTERVAL
+        };
+        if terminal_event::poll(poll_interval)? {
             for _ in 0..MAX_EVENTS_PER_FRAME {
                 redraw |= handle_terminal_event(app, terminal_event::read()?);
                 if app.should_quit() || !terminal_event::poll(Duration::ZERO)? {
@@ -108,7 +116,11 @@ fn run(
                 }
             }
         } else {
-            redraw = app.update(Message::Tick);
+            if app.animation_active(Instant::now()) {
+                redraw = app.update(Message::Frame { at: Instant::now() });
+            } else {
+                redraw = app.update(Message::Tick);
+            }
         }
 
         if redraw && !app.should_quit() {
@@ -121,7 +133,11 @@ fn run(
 
 fn handle_terminal_event(app: &mut App, event: CrosstermEvent) -> bool {
     match event {
-        CrosstermEvent::Resize(width, height) => app.update(Message::Resize { width, height }),
+        CrosstermEvent::Resize(width, height) => app.update(Message::Resize {
+            width,
+            height,
+            at: Instant::now(),
+        }),
         event => map_event(event).is_some_and(|message| app.update(message)),
     }
 }
