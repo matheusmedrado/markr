@@ -385,7 +385,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(" quit", theme.muted()),
         ])
     };
-    let right = Span::styled("MarkR · calm tools for living documents  ", theme.muted());
+    let right = Span::styled(format!("MarkR · {} theme  ", theme.name), theme.muted());
     let mut spans = left.spans;
     spans.push(Span::raw(" "));
     spans.push(right);
@@ -406,6 +406,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from(" g / G         top / bottom"),
         Line::from(" Ctrl-u/d       page up / down"),
         Line::from(" t              toggle outline"),
+        Line::from(" T              cycle color theme"),
         Line::from(" 1 / 2          outline / files panel"),
         Line::from(" Enter / l / →  open file or directory"),
         Line::from(" h / ←          explorer parent directory"),
@@ -540,7 +541,7 @@ mod tests {
     fn renders_every_document_position_without_panicking() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
         let workspace = Workspace::open(Some(path), true).expect("README workspace");
-        let mut app = App::new(workspace, Picker::halfblocks()).expect("app");
+        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
         app.update(Message::Resize {
             width: 120,
             height: 40,
@@ -561,7 +562,7 @@ mod tests {
         let workspace = Workspace::open(Some(path), true).expect("README workspace");
         let mut picker = Picker::halfblocks();
         picker.set_protocol_type(ProtocolType::Iterm2);
-        let mut app = App::new(workspace, picker).expect("app");
+        let mut app = App::new(workspace, picker, Theme::default()).expect("app");
         app.update(Message::Resize {
             width: 120,
             height: 40,
@@ -582,7 +583,7 @@ mod tests {
         let workspace = Workspace::open(Some(path), true).expect("README workspace");
         let mut picker = Picker::halfblocks();
         picker.set_protocol_type(ProtocolType::Kitty);
-        let mut app = App::new(workspace, picker).expect("app");
+        let mut app = App::new(workspace, picker, Theme::default()).expect("app");
         app.update(Message::Resize {
             width: 120,
             height: 40,
@@ -603,7 +604,7 @@ mod tests {
         let workspace = Workspace::open(Some(path), true).expect("README workspace");
         let mut picker = Picker::halfblocks();
         picker.set_protocol_type(ProtocolType::Kitty);
-        let mut app = App::new(workspace, picker).expect("app");
+        let mut app = App::new(workspace, picker, Theme::default()).expect("app");
         app.update(Message::Resize {
             width: 120,
             height: 40,

@@ -30,6 +30,7 @@ use ratatui_image::picker::Picker;
 
 use crate::app::{App, Message};
 use crate::event::map_event;
+use crate::theme::{Theme, ThemeName};
 use crate::workspace::Workspace;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(150);
@@ -42,6 +43,10 @@ const MAX_EVENTS_PER_FRAME: usize = 64;
     about = "A polished Markdown workspace for the terminal"
 )]
 struct Cli {
+    /// Color theme: markr, midnight or paper.
+    #[arg(long, default_value_t = ThemeName::default())]
+    theme: ThemeName,
+
     /// Markdown file or directory to open. If omitted, stdin is used when piped.
     path: Option<PathBuf>,
 }
@@ -78,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
     let size = terminal.size()?;
-    let mut app = App::new(workspace, picker)?;
+    let mut app = App::new(workspace, picker, Theme::new(cli.theme))?;
     app.update(Message::Resize {
         width: size.width,
         height: size.height,
@@ -136,5 +141,31 @@ impl Drop for TerminalSession {
         if self.alternate_screen {
             let _ = execute!(stdout, LeaveAlternateScreen, Show);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use clap::Parser;
+
+    use super::Cli;
+    use crate::theme::ThemeName;
+
+    #[test]
+    fn uses_the_markr_theme_by_default() {
+        let cli = Cli::try_parse_from(["markr", "README.md"]).expect("valid CLI");
+
+        assert_eq!(cli.theme, ThemeName::Markr);
+        assert_eq!(cli.path, Some(PathBuf::from("README.md")));
+    }
+
+    #[test]
+    fn accepts_a_named_theme() {
+        let cli =
+            Cli::try_parse_from(["markr", "--theme", "paper", "README.md"]).expect("valid theme");
+
+        assert_eq!(cli.theme, ThemeName::Paper);
     }
 }

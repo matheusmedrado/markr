@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Theme, ThemeSet};
+use syntect::highlighting::ThemeSet;
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
@@ -11,7 +11,7 @@ use crate::theme::Theme as MarkrTheme;
 
 struct HighlighterAssets {
     syntax_set: SyntaxSet,
-    theme: Theme,
+    theme_set: ThemeSet,
 }
 
 static ASSETS: OnceLock<HighlighterAssets> = OnceLock::new();
@@ -19,7 +19,14 @@ static ASSETS: OnceLock<HighlighterAssets> = OnceLock::new();
 pub fn highlight(language: Option<&str>, code: &str, theme: MarkrTheme) -> Vec<Vec<Span<'static>>> {
     let assets = ASSETS.get_or_init(load_assets);
     let syntax = find_syntax(language, &assets.syntax_set);
-    let mut highlighter = HighlightLines::new(syntax, &assets.theme);
+    let syntax_theme = assets
+        .theme_set
+        .themes
+        .get(theme.syntax_theme())
+        .or_else(|| assets.theme_set.themes.get("base16-ocean.dark"))
+        .or_else(|| assets.theme_set.themes.values().next())
+        .expect("syntect ships at least one default theme");
+    let mut highlighter = HighlightLines::new(syntax, syntax_theme);
 
     LinesWithEndings::from(code)
         .map(|line| {
@@ -56,13 +63,10 @@ pub fn highlight(language: Option<&str>, code: &str, theme: MarkrTheme) -> Vec<V
 fn load_assets() -> HighlighterAssets {
     let syntax_set = SyntaxSet::load_defaults_newlines();
     let theme_set = ThemeSet::load_defaults();
-    let theme = theme_set
-        .themes
-        .get("base16-ocean.dark")
-        .cloned()
-        .or_else(|| theme_set.themes.values().next().cloned())
-        .expect("syntect ships at least one default theme");
-    HighlighterAssets { syntax_set, theme }
+    HighlighterAssets {
+        syntax_set,
+        theme_set,
+    }
 }
 
 fn find_syntax<'a>(language: Option<&str>, syntax_set: &'a SyntaxSet) -> &'a SyntaxReference {
@@ -78,7 +82,7 @@ fn find_syntax<'a>(language: Option<&str>, syntax_set: &'a SyntaxSet) -> &'a Syn
 #[cfg(test)]
 mod tests {
     use super::highlight;
-    use crate::theme::Theme;
+    use crate::theme::{Theme, ThemeName};
 
     #[test]
     fn highlights_known_languages() {
@@ -108,5 +112,21 @@ mod tests {
                 .collect::<String>(),
             "plain text"
         );
+    }
+
+    #[test]
+    fn uses_a_light_syntax_palette_for_the_paper_theme() {
+        let code = "fn main() { let answer = 42; }\n";
+        let dark = highlight(Some("rust"), code, Theme::default());
+        let light = highlight(Some("rust"), code, Theme::new(ThemeName::Paper));
+        let foregrounds = |lines: &[Vec<ratatui::text::Span<'static>>]| {
+            lines
+                .iter()
+                .flatten()
+                .map(|span| span.style.fg)
+                .collect::<Vec<_>>()
+        };
+
+        assert_ne!(foregrounds(&dark), foregrounds(&light));
     }
 }
