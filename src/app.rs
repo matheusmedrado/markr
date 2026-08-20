@@ -10,6 +10,7 @@ use crate::explorer::{Activation, FileExplorer};
 use crate::images::ImageStore;
 use crate::layout;
 use crate::markdown::Document;
+use crate::selection::{CursorPosition, Selection};
 use crate::theme::{Theme, ThemeName};
 use crate::workspace::Workspace;
 
@@ -71,6 +72,10 @@ pub enum Message {
         key: KeyEvent,
         at: Instant,
     },
+    Mouse {
+        event: crossterm::event::MouseEvent,
+        at: Instant,
+    },
     Tick,
     Resize {
         width: u16,
@@ -109,6 +114,8 @@ pub struct App {
     pub search_input: Option<String>,
     search_matches: Vec<SearchMatch>,
     search_selected: usize,
+    pub selection: Option<Selection>,
+    pub select_mode: bool,
     responsive_mode: ResponsiveMode,
     sidebar_transition: Transition,
     tab_transition: Transition,
@@ -138,6 +145,8 @@ struct UiSnapshot {
     search_query: String,
     search_input: Option<String>,
     search_selected: usize,
+    selection: Option<Selection>,
+    select_mode: bool,
     quit: bool,
 }
 
@@ -177,6 +186,8 @@ impl App {
             search_input: None,
             search_matches: Vec::new(),
             search_selected: 0,
+            selection: None,
+            select_mode: false,
             responsive_mode: ResponsiveMode::Attached,
             sidebar_transition: Transition::new(
                 0.0,
@@ -278,6 +289,31 @@ impl App {
         }
     }
 
+    pub fn reader_outer_area(&self) -> ratatui::layout::Rect {
+        let total = ratatui::layout::Rect::new(
+            0,
+            1,
+            self.terminal_width,
+            self.terminal_height.saturating_sub(2),
+        );
+        let _gutter = if self.terminal_width < 72 { 0 } else { 1 };
+        let x = if self.responsive_mode == ResponsiveMode::Attached && self.sidebar_visible {
+            total
+                .x
+                .saturating_add(self.sidebar_width().saturating_add(1))
+        } else {
+            total.x
+        };
+        let width = total.width.saturating_sub(x.saturating_sub(total.x));
+        let horizontal_gutter = if total.width < 72 { 0 } else { 1 };
+        ratatui::layout::Rect::new(
+            x.saturating_add(horizontal_gutter),
+            total.y,
+            width.saturating_sub(horizontal_gutter.saturating_mul(2)),
+            total.height,
+        )
+    }
+
     fn set_sidebar_visible(&mut self, visible: bool, at: Instant) {
         if self.sidebar_visible == visible {
             return;
@@ -347,8 +383,13 @@ impl App {
                 if self.document_width() != previous_width || self.theme != previous_theme {
                     self.rebuild_layout();
                 }
+                self.clamp_selection();
                 self.clamp_scroll();
                 before != self.ui_snapshot()
+            }
+            Message::Mouse { event, at } => {
+                self.handle_mouse(event, at);
+                true
             }
             Message::Tick => self.reload_if_changed(),
             Message::Resize { width, height, at } => {
@@ -360,6 +401,7 @@ impl App {
                 self.update_responsive_mode(at);
                 self.rebuild_layout();
                 self.refresh_search();
+                self.clamp_selection();
                 self.clamp_scroll();
                 true
             }
@@ -395,6 +437,8 @@ impl App {
             search_query: self.search_query.clone(),
             search_input: self.search_input.clone(),
             search_selected: self.search_selected,
+            selection: self.selection.clone(),
+            select_mode: self.select_mode,
             quit: self.quit,
         }
     }
@@ -426,6 +470,13 @@ impl App {
             KeyCode::Char('/') => self.search_input = Some(self.search_query.clone()),
             KeyCode::Char('n') => self.next_search_match(),
             KeyCode::Char('N') => self.previous_search_match(),
+            KeyCode::Char('v') if self.focus == Focus::Document => {
+                self.start_selection(CursorPosition::new(self.scroll, 0))
+            }
+            KeyCode::Char('y') if self.focus == Focus::Document => {
+                let _ = self.copy_selection();
+                self.clear_selection();
+            }
             KeyCode::Char('t') => self.set_sidebar_visible(!self.sidebar_visible, at),
             KeyCode::Char('T') => {
                 self.theme = self.theme.next();
@@ -437,6 +488,7 @@ impl App {
                 self.focus = toggle_focus(self.focus);
                 self.tab_transition = Transition::new(0.0, 1.0, at, Duration::from_millis(120));
                 if self.focus == Focus::Sidebar {
+                    self.clear_selection();
                     self.set_sidebar_visible(true, at);
                 } else if self.responsive_mode != ResponsiveMode::Attached {
                     self.set_sidebar_visible(false, at);
@@ -465,8 +517,30 @@ impl App {
             }
             KeyCode::Char(']') => self.switch_file(true),
             KeyCode::Char('[') => self.switch_file(false),
-            KeyCode::Up | KeyCode::Char('k') => self.move_up(at),
-            KeyCode::Down | KeyCode::Char('j') => self.move_down(at),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.select_mode && self.focus == Focus::Document {
+                    self.selection_move_up();
+                } else {
+                    self.move_up(at);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.select_mode && self.focus == Focus::Document {
+                    self.selection_move_down();
+                } else {
+                    self.move_down(at);
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                if self.select_mode && self.focus == Focus::Document {
+                    self.selection_move_left();
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if self.select_mode && self.focus == Focus::Document {
+                    self.selection_move_right();
+                }
+            }
             KeyCode::PageUp => self.page_up(),
             KeyCode::PageDown => self.page_down(),
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => self.page_up(),
@@ -476,7 +550,9 @@ impl App {
             KeyCode::Enter if self.focus == Focus::Sidebar => self.activate_sidebar_selection(at),
             KeyCode::Esc => {
                 self.set_help_visible(false, at);
-                if self.search_input.is_some() || !self.search_query.is_empty() {
+                if self.select_mode && self.focus == Focus::Document {
+                    self.clear_selection();
+                } else if self.search_input.is_some() || !self.search_query.is_empty() {
                     self.cancel_search();
                 } else if self.focus == Focus::Sidebar {
                     self.focus = Focus::Document;
@@ -487,6 +563,77 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_mouse(&mut self, event: crossterm::event::MouseEvent, _at: Instant) {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        if self.focus != Focus::Document {
+            return;
+        }
+        if self.responsive_mode == ResponsiveMode::Overlay
+            && self.sidebar_visible
+            && event.column < self.sidebar_width()
+        {
+            return;
+        }
+        let Some(position) = self.document_position_at(event.column, event.row) else {
+            return;
+        };
+
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.start_selection(position);
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.update_selection(position);
+            }
+            MouseEventKind::Up(MouseButton::Left)
+                if self
+                    .selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.is_empty()) =>
+            {
+                self.clear_selection();
+            }
+            _ => {}
+        }
+    }
+
+    fn document_position_at(&self, screen_x: u16, screen_y: u16) -> Option<CursorPosition> {
+        let document_area = self.reader_outer_area();
+        if document_area.width == 0 || document_area.height == 0 {
+            return None;
+        }
+
+        let inner_x = document_area.x.saturating_add(3);
+        let inner_y = document_area.y.saturating_add(1);
+        let inner_width = document_area.width.saturating_sub(5);
+        let inner_height = document_area.height.saturating_sub(2);
+
+        if screen_x < inner_x
+            || screen_x >= inner_x.saturating_add(inner_width)
+            || screen_y < inner_y
+            || screen_y >= inner_y + inner_height
+        {
+            return None;
+        }
+
+        let relative_x = screen_x - inner_x;
+        let relative_y = screen_y - inner_y;
+        let line = self.scroll.saturating_add(usize::from(relative_y));
+        if line >= self.document_layout.lines.len() {
+            return None;
+        }
+
+        let margin = self.document_layout.content_margin;
+        let column = if usize::from(relative_x) > margin {
+            usize::from(relative_x).saturating_sub(margin)
+        } else {
+            0
+        };
+
+        Some(CursorPosition::new(line, column))
     }
 
     fn handle_search_input(&mut self, key: KeyEvent) {
@@ -512,6 +659,123 @@ impl App {
         self.search_query.clear();
         self.search_matches.clear();
         self.search_selected = 0;
+    }
+
+    pub fn start_selection(&mut self, position: CursorPosition) {
+        let Some(position) = crate::selection::clamp_position_with_margin(
+            position,
+            &self.document_layout.lines,
+            self.document_layout.content_margin,
+        ) else {
+            self.clear_selection();
+            return;
+        };
+        self.select_mode = true;
+        self.selection = Some(Selection::new(position, position));
+    }
+
+    pub fn update_selection(&mut self, position: CursorPosition) {
+        if let Some(position) = crate::selection::clamp_position_with_margin(
+            position,
+            &self.document_layout.lines,
+            self.document_layout.content_margin,
+        ) && let Some(selection) = &mut self.selection
+        {
+            selection.head = position;
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.select_mode = false;
+        self.selection = None;
+    }
+
+    fn clamp_selection(&mut self) {
+        let Some(selection) = self.selection.as_ref() else {
+            return;
+        };
+        let lines = &self.document_layout.lines;
+        let anchor = crate::selection::clamp_position_with_margin(
+            selection.anchor,
+            lines,
+            self.document_layout.content_margin,
+        );
+        let head = crate::selection::clamp_position_with_margin(
+            selection.head,
+            lines,
+            self.document_layout.content_margin,
+        );
+        match (anchor, head) {
+            (Some(anchor), Some(head)) => {
+                if let Some(selection) = self.selection.as_mut() {
+                    selection.anchor = anchor;
+                    selection.head = head;
+                }
+            }
+            _ => self.clear_selection(),
+        }
+    }
+
+    pub fn copy_selection(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(selection) = &self.selection else {
+            return Ok(());
+        };
+        let text = selection.text_with_margin(
+            &self.document_layout.lines,
+            self.document_layout.content_margin,
+        );
+        if text.is_empty() {
+            return Ok(());
+        }
+        let mut clipboard = arboard::Clipboard::new()?;
+        clipboard.set_text(text)?;
+        Ok(())
+    }
+
+    fn selection_move_up(&mut self) {
+        let Some(selection) = &mut self.selection else {
+            return;
+        };
+        let new_line = selection.head.line.saturating_sub(1);
+        selection.head = CursorPosition::new(new_line, selection.head.column);
+        self.clamp_selection();
+    }
+
+    fn selection_move_down(&mut self) {
+        let Some(selection) = &mut self.selection else {
+            return;
+        };
+        let new_line = selection
+            .head
+            .line
+            .saturating_add(1)
+            .min(self.document_layout.lines.len().saturating_sub(1));
+        selection.head = CursorPosition::new(new_line, selection.head.column);
+        self.clamp_selection();
+    }
+
+    fn selection_move_left(&mut self) {
+        let Some(selection) = &mut self.selection else {
+            return;
+        };
+        let column = selection.head.column.saturating_sub(1);
+        selection.head = CursorPosition::new(selection.head.line, column);
+    }
+
+    fn selection_move_right(&mut self) {
+        let Some(selection) = &mut self.selection else {
+            return;
+        };
+        let Some(line) = self.document_layout.lines.get(selection.head.line) else {
+            return;
+        };
+        let text = crate::selection::content_text(line, self.document_layout.content_margin);
+        let column = selection
+            .head
+            .column
+            .saturating_add(1)
+            .min(crate::selection::text_width(&text));
+        selection.head = CursorPosition::new(selection.head.line, column);
     }
 
     fn confirm_search(&mut self) {
@@ -639,6 +903,7 @@ impl App {
     }
 
     fn select_sidebar_panel(&mut self, panel: SidebarPanel, at: Instant) {
+        self.clear_selection();
         self.sidebar_panel = panel;
         self.set_sidebar_visible(true, at);
         self.tab_transition = Transition::new(0.0, 1.0, at, Duration::from_millis(120));
@@ -759,6 +1024,7 @@ impl App {
                 let dir = document_dir(&self.workspace);
                 self.images.load(dir.as_deref(), &self.document);
                 self.rebuild_layout();
+                self.clear_selection();
                 self.clear_search();
                 self.clamp_scroll();
             }
@@ -985,6 +1251,42 @@ mod tests {
         assert!(app.search_input.is_none());
         assert!(app.search_query.is_empty());
         assert!(app.search_matches.is_empty());
+    }
+
+    #[test]
+    fn keyboard_selection_requests_redraw_and_stays_in_document_bounds() {
+        let mut app = readme_app();
+
+        assert!(app.update(key(KeyCode::Char('v'))));
+        assert!(app.select_mode);
+        assert!(app.selection.is_some());
+
+        for _ in 0..10_000 {
+            app.update(key(KeyCode::Right));
+        }
+        let selection = app.selection.as_ref().expect("active selection");
+        let line = &app.document_layout.lines[selection.head.line];
+        let text = crate::selection::line_text(line);
+        assert!(selection.head.column <= crate::selection::text_width(&text));
+
+        assert!(app.update(key(KeyCode::Esc)));
+        assert!(!app.select_mode);
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn invalid_selection_positions_are_clamped_to_document_bounds() {
+        let mut app = readme_app();
+
+        app.start_selection(crate::selection::CursorPosition::new(
+            usize::MAX,
+            usize::MAX,
+        ));
+
+        assert!(app.select_mode);
+        assert!(app.selection.is_some());
+        let selection = app.selection.as_ref().expect("clamped selection");
+        assert!(selection.anchor.line < app.document_layout.lines.len());
     }
 
     #[test]
