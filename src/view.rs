@@ -313,7 +313,7 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     }
     frame.render_widget(
         RoundedSidebar {
-            border: app.theme.reader_border,
+            border: app.theme.border,
         },
         area,
     );
@@ -321,20 +321,15 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let tabs = Line::from(vec![
-        Span::styled(" OUTLINE ", sidebar_tab_style(app, SidebarPanel::Outline)),
-        Span::raw(" "),
-        Span::styled(" FILES ", sidebar_tab_style(app, SidebarPanel::Files)),
-    ]);
-    frame.render_widget(
-        Paragraph::new(tabs),
-        Rect::new(inner.x, inner.y, inner.width, 1),
-    );
+
+    let tabs_area = Rect::new(inner.x, inner.y, inner.width, 2);
+    render_sidebar_tabs(frame, app, tabs_area);
+
     let list_area = Rect::new(
         inner.x,
-        inner.y.saturating_add(1),
+        inner.y.saturating_add(2),
         inner.width,
-        inner.height.saturating_sub(1),
+        inner.height.saturating_sub(2),
     );
     match app.sidebar_panel {
         SidebarPanel::Outline => render_outline(frame, app, list_area),
@@ -342,8 +337,41 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn render_sidebar_tabs(frame: &mut Frame, app: &App, area: Rect) {
+    let outline_label = "  HEADINGS  ";
+    let files_label = "  FILES  ";
+
+    let tabs = Line::from(vec![
+        Span::styled(outline_label, sidebar_tab_style(app, SidebarPanel::Outline)),
+        Span::raw(" "),
+        Span::styled(files_label, sidebar_tab_style(app, SidebarPanel::Files)),
+    ]);
+    frame.render_widget(Paragraph::new(tabs), area);
+
+    let (active_label, offset) = if app.sidebar_panel == SidebarPanel::Outline {
+        (outline_label, 0)
+    } else {
+        (files_label, outline_label.len() + 1)
+    };
+    let underline = "─".repeat(active_label.len());
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            underline,
+            Style::default().fg(app.theme.accent),
+        )))
+        .alignment(Alignment::Left),
+        Rect::new(
+            area.x + offset as u16,
+            area.y + 1,
+            area.width.saturating_sub(offset as u16),
+            1,
+        ),
+    );
+}
+
 fn render_outline(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme;
+    let padding = "  ";
     let items: Vec<ListItem> = if app.document.outline.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             "  No headings",
@@ -361,33 +389,29 @@ fn render_outline(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     "· "
                 };
-                let style = if index == app.outline_selected {
-                    let mut style = Style::default().fg(if app.focus == Focus::Sidebar {
-                        theme.chrome_text
-                    } else {
-                        theme.chrome_muted
-                    });
-                    if app.focus == Focus::Sidebar {
-                        style = style.bg(theme.selection).add_modifier(Modifier::BOLD);
-                    }
-                    style
-                } else {
-                    Style::default().fg(theme.chrome_muted)
-                };
-                let marker_style = if index == app.outline_selected {
-                    style.fg(theme.accent)
-                } else {
-                    style
-                };
                 ListItem::new(Line::from(vec![
-                    Span::styled(marker, marker_style),
-                    Span::styled(format!("{indent}{}", heading.title), style),
+                    Span::styled(padding, Style::default()),
+                    Span::styled(marker, Style::default().fg(theme.accent)),
+                    Span::styled(
+                        format!("{indent}{}", heading.title),
+                        Style::default().fg(theme.chrome_muted),
+                    ),
                 ]))
             })
             .collect()
     };
 
-    let list = List::new(items).style(Style::default().bg(Color::Reset));
+    let highlight_style = if app.focus == Focus::Sidebar {
+        Style::default()
+            .fg(theme.chrome_text)
+            .bg(theme.selection)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.accent)
+    };
+    let list = List::new(items)
+        .style(Style::default().bg(Color::Reset))
+        .highlight_style(highlight_style);
     let mut state = ListState::default()
         .with_selected((!app.document.outline.is_empty()).then_some(app.outline_selected));
     frame.render_stateful_widget(list, area, &mut state);
@@ -395,6 +419,7 @@ fn render_outline(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_files(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme;
+    let padding = "  ";
     let items: Vec<ListItem> = if app.file_explorer.entries().is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             "  Empty directory",
@@ -407,7 +432,8 @@ fn render_files(frame: &mut Frame, app: &App, area: Rect) {
             .enumerate()
             .map(|(index, entry)| {
                 let active = app.workspace.active_path() == Some(entry.path.as_path());
-                let marker = if index == app.file_explorer.selected() {
+                let selected = index == app.file_explorer.selected();
+                let marker = if selected {
                     "▌ "
                 } else {
                     match entry.kind {
@@ -426,13 +452,9 @@ fn render_files(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Style::default().fg(theme.text_muted)
                 };
-                let marker_style = if index == app.file_explorer.selected() {
-                    style.fg(theme.accent)
-                } else {
-                    style
-                };
                 ListItem::new(Line::from(vec![
-                    Span::styled(marker, marker_style),
+                    Span::styled(padding, Style::default()),
+                    Span::styled(marker, style.fg(theme.accent)),
                     Span::styled(
                         format!("{}{}", entry.name, suffix.unwrap_or_default()),
                         style,
@@ -442,25 +464,13 @@ fn render_files(frame: &mut Frame, app: &App, area: Rect) {
             .collect()
     };
 
-    let directory = Paragraph::new(Line::from(Span::styled(
-        format!(" {}", app.file_explorer.directory().display()),
-        theme.title(),
-    )));
-    let directory_area = Rect::new(area.x, area.y, area.width, area.height.min(1));
-    frame.render_widget(directory, directory_area);
-    let list_area = Rect::new(
-        area.x,
-        area.y.saturating_add(1),
-        area.width,
-        area.height.saturating_sub(1),
-    );
     let highlight_style = if app.focus == Focus::Sidebar {
         Style::default()
             .fg(theme.chrome_text)
             .bg(theme.selection)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
+        Style::default().fg(theme.accent)
     };
     let list = List::new(items)
         .style(Style::default().bg(Color::Reset))
@@ -468,7 +478,7 @@ fn render_files(frame: &mut Frame, app: &App, area: Rect) {
     let mut state = ListState::default().with_selected(
         (!app.file_explorer.entries().is_empty()).then_some(app.file_explorer.selected()),
     );
-    frame.render_stateful_widget(list, list_area, &mut state);
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn highlight_search_line(
@@ -811,6 +821,29 @@ mod tests {
         assert_eq!(buffer[(119, 1)].symbol(), " ");
         assert_eq!(buffer[(32, 3)].symbol(), "▎");
         assert_eq!(buffer[(32, 3)].fg, Theme::default().accent);
+    }
+
+    #[test]
+    fn sidebar_keeps_transparent_background_and_renders_tab_underline() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| super::render(frame, &app))
+            .expect("render shell");
+
+        let buffer = terminal.backend().buffer();
+        let theme = Theme::default();
+        assert_eq!(buffer[(1, 5)].bg, Color::Reset);
+        assert_eq!(buffer[(0, 1)].symbol(), "╭");
+        assert_eq!(buffer[(0, 1)].bg, Color::Reset);
+        assert_eq!(buffer[(2, 3)].fg, theme.accent);
     }
 
     #[test]
