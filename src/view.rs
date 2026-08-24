@@ -215,6 +215,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     if app.help_visible || app.help_progress(Instant::now()) > 0.0 {
         render_help(frame, app);
     }
+    if app.has_unsaved_prompt() {
+        render_unsaved_prompt(frame, app);
+    }
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -803,7 +806,11 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("l/Enter", theme.accent()),
             Span::styled(" open  ", theme.muted()),
             Span::styled("r", theme.accent()),
-            Span::styled(" refresh", theme.muted()),
+            Span::styled(" refresh  ", theme.muted()),
+            Span::styled("TAB", theme.accent()),
+            Span::styled(" focus  ", theme.muted()),
+            Span::styled("e", theme.accent()),
+            Span::styled(" edit", theme.muted()),
         ])
     } else {
         Line::from(vec![
@@ -811,6 +818,8 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(" search  ", theme.muted()),
             Span::styled("TAB", theme.accent()),
             Span::styled(" focus  ", theme.muted()),
+            Span::styled("e", theme.accent()),
+            Span::styled(" edit  ", theme.muted()),
             Span::styled("?", theme.accent()),
             Span::styled(" help", theme.muted()),
         ])
@@ -882,6 +891,31 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from(" q              quit"),
         Line::default(),
         Line::from(Span::styled(" Press any key to return ", theme.muted())),
+    ]);
+    frame.render_widget(Clear, area);
+    frame.render_widget(RoundedPanel::new(theme), area);
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().fg(theme.text).bg(theme.reader_background)),
+        RoundedPanel::inner(area),
+    );
+}
+
+fn render_unsaved_prompt(frame: &mut Frame, app: &App) {
+    let area = centered_rect(58, 30, frame.area());
+    let theme = app.theme;
+    let text = Text::from(vec![
+        Line::from(Span::styled(" MARKR / UNSAVED CHANGES ", theme.accent())),
+        Line::default(),
+        Line::from("Leave the editor with unsaved changes?"),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("s / Enter", theme.accent()),
+            Span::styled(" save  ", theme.muted()),
+            Span::styled("d", theme.accent()),
+            Span::styled(" discard  ", theme.muted()),
+            Span::styled("Esc", theme.accent()),
+            Span::styled(" continue editing", theme.muted()),
+        ]),
     ]);
     frame.render_widget(Clear, area);
     frame.render_widget(RoundedPanel::new(theme), area);

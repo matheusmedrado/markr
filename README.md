@@ -107,7 +107,9 @@ When a directory is provided, MarkR recursively discovers files with the `.md`, 
 | `n` / `N` | Next / previous highlighted search match |
 | `e` | Edit the active Markdown file |
 | `Ctrl-S` in the editor | Save edits and refresh the rendered document |
-| `Esc` in the editor | Cancel edits and return to the reader |
+| `Esc` in the editor | Return to the reader; confirm when edits are unsaved |
+| `q` / `Ctrl-C` in the editor | Quit; confirm when edits are unsaved |
+| `s` / `d` at the unsaved prompt | Save / discard changes |
 | `v` | Start a keyboard selection in the reader |
 | `←` / `→`, `↑` / `↓`, `h` / `j` / `k` / `l` while selecting | Extend the selection |
 | `y` | Copy the selection to the clipboard |

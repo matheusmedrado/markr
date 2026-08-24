@@ -34,6 +34,12 @@ pub enum ResponsiveMode {
     Fullscreen,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsavedAction {
+    CancelEdit,
+    Quit,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Transition {
     from: f32,
@@ -114,6 +120,7 @@ pub struct App {
     pub editor: Option<EditorBuffer>,
     pub editor_scroll: usize,
     pub editor_horizontal_scroll: usize,
+    pub unsaved_action: Option<UnsavedAction>,
     pub search_query: String,
     pub search_input: Option<String>,
     search_matches: Vec<SearchMatch>,
@@ -151,6 +158,7 @@ struct UiSnapshot {
     editor_scroll: usize,
     editor_horizontal_scroll: usize,
     editor_dirty: bool,
+    unsaved_action: Option<UnsavedAction>,
     search_query: String,
     search_input: Option<String>,
     search_selected: usize,
@@ -194,6 +202,7 @@ impl App {
             editor: None,
             editor_scroll: 0,
             editor_horizontal_scroll: 0,
+            unsaved_action: None,
             search_query: String::new(),
             search_input: None,
             search_matches: Vec::new(),
@@ -247,6 +256,10 @@ impl App {
 
     pub fn editor_dirty(&self) -> bool {
         self.editor.as_ref().is_some_and(EditorBuffer::dirty)
+    }
+
+    pub fn has_unsaved_prompt(&self) -> bool {
+        self.unsaved_action.is_some()
     }
 
     pub fn editor_content_width(&self) -> usize {
@@ -479,6 +492,7 @@ impl App {
             editor_scroll: self.editor_scroll,
             editor_horizontal_scroll: self.editor_horizontal_scroll,
             editor_dirty: self.editor_dirty(),
+            unsaved_action: self.unsaved_action,
             search_query: self.search_query.clone(),
             search_input: self.search_input.clone(),
             search_selected: self.search_selected,
@@ -489,8 +503,13 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent, at: Instant) {
+        if self.unsaved_action.is_some() {
+            self.handle_unsaved_prompt(key, at);
+            return;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.quit = true;
+            self.request_quit(at);
             return;
         }
 
@@ -648,7 +667,8 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => self.cancel_editor(at),
+            KeyCode::Char('q') => self.request_quit(at),
+            KeyCode::Esc => self.request_cancel_editor(at),
             KeyCode::Left => self.editor_move(|editor| editor.move_left()),
             KeyCode::Right => self.editor_move(|editor| editor.move_right()),
             KeyCode::Up => self.editor_move(|editor| editor.move_up()),
@@ -682,6 +702,66 @@ impl App {
             _ => {}
         }
         self.ensure_editor_cursor_visible();
+    }
+
+    fn handle_unsaved_prompt(&mut self, key: KeyEvent, at: Instant) {
+        let Some(action) = self.unsaved_action else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Char('s') | KeyCode::Enter => {
+                if self.save_editor(at) {
+                    self.unsaved_action = None;
+                    self.finish_editor_action(action, at);
+                }
+            }
+            KeyCode::Char('d') => {
+                self.unsaved_action = None;
+                self.discard_editor(at, action);
+            }
+            KeyCode::Esc | KeyCode::Char('c') => {
+                self.unsaved_action = None;
+                self.set_message("continuing edit", at);
+            }
+            _ => {}
+        }
+    }
+
+    fn request_cancel_editor(&mut self, at: Instant) {
+        if self.editor_dirty() {
+            self.unsaved_action = Some(UnsavedAction::CancelEdit);
+            self.set_message("unsaved changes · s save · d discard · Esc continue", at);
+        } else {
+            self.cancel_editor(at);
+        }
+    }
+
+    fn request_quit(&mut self, at: Instant) {
+        if self.editor_dirty() {
+            self.unsaved_action = Some(UnsavedAction::Quit);
+            self.set_message("unsaved changes · s save · d discard · Esc continue", at);
+        } else {
+            self.quit = true;
+        }
+    }
+
+    fn finish_editor_action(&mut self, action: UnsavedAction, at: Instant) {
+        match action {
+            UnsavedAction::CancelEdit => self.cancel_editor(at),
+            UnsavedAction::Quit => self.quit = true,
+        }
+    }
+
+    fn discard_editor(&mut self, at: Instant, action: UnsavedAction) {
+        self.editor = None;
+        self.editor_scroll = 0;
+        self.editor_horizontal_scroll = 0;
+        self.load_active_file();
+        match action {
+            UnsavedAction::CancelEdit => self.set_message("changes discarded", at),
+            UnsavedAction::Quit => self.quit = true,
+        }
     }
 
     fn editor_move(&mut self, action: impl FnOnce(&mut EditorBuffer)) {
@@ -737,9 +817,9 @@ impl App {
         }
     }
 
-    fn save_editor(&mut self, at: Instant) {
+    fn save_editor(&mut self, at: Instant) -> bool {
         let Some(content) = self.editor.as_ref().map(EditorBuffer::text) else {
-            return;
+            return false;
         };
         match self.workspace.save_content(&content) {
             Ok(()) => {
@@ -748,11 +828,13 @@ impl App {
                 }
                 self.apply_document_content(&content);
                 self.set_message("saved", at);
+                true
             }
             Err(error) => {
                 let message = format!("Cannot save file: {error}");
                 self.error = Some(message.clone());
                 self.set_message(message, at);
+                false
             }
         }
     }
@@ -1527,12 +1609,59 @@ mod tests {
         app.update(key(KeyCode::End));
         app.update(key(KeyCode::Char('!')));
         app.update(key(KeyCode::Esc));
+        app.update(key(KeyCode::Char('d')));
 
         assert!(!app.is_editing());
         assert_eq!(
             fs::read_to_string(&path).expect("original document"),
             "# One"
         );
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn prompts_before_cancelling_dirty_edits() {
+        let (path, mut app) = temporary_document();
+
+        app.update(key(KeyCode::Char('e')));
+        app.update(key(KeyCode::End));
+        app.update(key(KeyCode::Char('!')));
+        app.update(key(KeyCode::Esc));
+
+        assert!(app.has_unsaved_prompt());
+        assert!(app.is_editing());
+
+        app.update(key(KeyCode::Esc));
+        assert!(!app.has_unsaved_prompt());
+        assert!(app.is_editing());
+        assert!(app.editor_dirty());
+
+        app.update(key(KeyCode::Esc));
+        assert!(app.has_unsaved_prompt());
+        app.update(key(KeyCode::Char('d')));
+        assert!(!app.is_editing());
+        assert_eq!(
+            fs::read_to_string(&path).expect("unchanged document"),
+            "# One"
+        );
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn prompts_before_quitting_and_can_save_first() {
+        let (path, mut app) = temporary_document();
+
+        app.update(key(KeyCode::Char('e')));
+        app.update(key(KeyCode::End));
+        app.update(key(KeyCode::Char('!')));
+        app.update(control_key(KeyCode::Char('c')));
+
+        assert!(app.has_unsaved_prompt());
+        assert!(!app.should_quit());
+
+        app.update(key(KeyCode::Char('s')));
+        assert!(app.should_quit());
+        assert_eq!(fs::read_to_string(&path).expect("saved document"), "# One!");
         fs::remove_file(path).expect("remove editor fixture");
     }
 
