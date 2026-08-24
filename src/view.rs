@@ -17,6 +17,7 @@ use crate::explorer::EntryKind;
 use crate::images::Asset;
 use crate::layout;
 use crate::selection;
+use crate::syntax;
 use crate::theme::Theme;
 
 pub struct FloatingReader {
@@ -218,6 +219,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     if app.has_unsaved_prompt() {
         render_unsaved_prompt(frame, app);
     }
+    if app.has_external_prompt() {
+        render_external_prompt(frame, app);
+    }
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -376,6 +380,10 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
     let theme = app.theme;
     let lines = app.editor_lines();
     let cursor = app.editor_cursor();
+    let highlighted_lines = app
+        .editor_text()
+        .map(|text| syntax::highlight(Some("markdown"), &text, theme))
+        .unwrap_or_default();
     let line_number_width = lines.len().max(1).to_string().len();
     let prefix_width = line_number_width.saturating_add(3);
     let visible_width = app.editor_content_width();
@@ -397,15 +405,29 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
                 absolute_line + 1,
                 line_number_width = line_number_width
             );
-            let content = selection::slice_by_columns(
-                line,
-                horizontal_scroll,
-                horizontal_scroll.saturating_add(visible_width),
-            );
-            Line::from(vec![
-                Span::styled(prefix, line_number_style),
-                Span::styled(content, Style::default().fg(theme.text)),
-            ])
+            let content = highlighted_lines
+                .get(absolute_line)
+                .map(|line| {
+                    slice_spans_by_columns(
+                        line,
+                        horizontal_scroll,
+                        horizontal_scroll.saturating_add(visible_width),
+                        theme.reader_background,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    vec![Span::styled(
+                        selection::slice_by_columns(
+                            line,
+                            horizontal_scroll,
+                            horizontal_scroll.saturating_add(visible_width),
+                        ),
+                        Style::default().fg(theme.text),
+                    )]
+                });
+            let mut spans = vec![Span::styled(prefix, line_number_style)];
+            spans.extend(content);
+            Line::from(spans)
         })
         .collect::<Vec<_>>();
 
@@ -438,6 +460,40 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
         .y
         .saturating_add(cursor.line.saturating_sub(start) as u16);
     frame.set_cursor_position(Position::new(x, y));
+}
+
+fn slice_spans_by_columns(
+    spans: &[Span<'static>],
+    start: usize,
+    end: usize,
+    background: Color,
+) -> Vec<Span<'static>> {
+    let mut result = Vec::new();
+    let mut column: usize = 0;
+
+    for span in spans {
+        let mut segment = String::new();
+        let style = span.style.bg(background);
+        for grapheme in span.content.graphemes(true) {
+            let grapheme_start = column;
+            let grapheme_end = column.saturating_add(grapheme.width());
+            if grapheme_end > grapheme_start && grapheme_start < end && grapheme_end > start {
+                segment.push_str(grapheme);
+            }
+            column = grapheme_end;
+            if column >= end {
+                break;
+            }
+        }
+        if !segment.is_empty() {
+            result.push(Span::styled(segment, style));
+        }
+        if column >= end {
+            break;
+        }
+    }
+
+    result
 }
 
 fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
@@ -768,7 +824,11 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if let Some(message) = app.temporary_message(Instant::now()) {
         Line::from(Span::styled(message, theme.accent()))
     } else if app.is_editing() {
-        Line::from(vec![
+        let mut spans = Vec::new();
+        if app.external_change_detected {
+            spans.push(Span::styled("⚠ file changed on disk  ", theme.warning));
+        }
+        spans.extend([
             Span::styled("EDIT", theme.accent()),
             Span::styled(
                 if app.editor_dirty() {
@@ -780,9 +840,12 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled("Ctrl-S", theme.accent()),
             Span::styled(" save  ", theme.muted()),
+            Span::styled("Ctrl-Z/Y", theme.accent()),
+            Span::styled(" undo/redo  ", theme.muted()),
             Span::styled("Esc", theme.accent()),
-            Span::styled(" cancel", theme.muted()),
-        ])
+            Span::styled(" leave", theme.muted()),
+        ]);
+        Line::from(spans)
     } else if let Some((current, total)) = app.search_result_position() {
         Line::from(vec![
             Span::styled(format!("/{}", app.search_query), theme.accent()),
@@ -880,8 +943,12 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from(" h / Backspace  explorer parent directory"),
         Line::from(" r              refresh explorer"),
         Line::from(" e              edit the active file"),
+        Line::from(" mouse click    place editor cursor"),
         Line::from(" Ctrl-S         save edits"),
-        Line::from(" Esc            cancel edits"),
+        Line::from(" Ctrl-Z/Y       undo / redo"),
+        Line::from(" Esc            leave editor"),
+        Line::from(" s/d            save / discard prompt"),
+        Line::from(" o/r            overwrite / reload changed file"),
         Line::from(" /              search rendered text"),
         Line::from(" n / N          next / previous match"),
         Line::from(" v              start keyboard selection"),
@@ -915,6 +982,32 @@ fn render_unsaved_prompt(frame: &mut Frame, app: &App) {
             Span::styled(" discard  ", theme.muted()),
             Span::styled("Esc", theme.accent()),
             Span::styled(" continue editing", theme.muted()),
+        ]),
+    ]);
+    frame.render_widget(Clear, area);
+    frame.render_widget(RoundedPanel::new(theme), area);
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().fg(theme.text).bg(theme.reader_background)),
+        RoundedPanel::inner(area),
+    );
+}
+
+fn render_external_prompt(frame: &mut Frame, app: &App) {
+    let area = centered_rect(62, 30, frame.area());
+    let theme = app.theme;
+    let text = Text::from(vec![
+        Line::from(Span::styled(" MARKR / FILE CHANGED ", theme.warning)),
+        Line::default(),
+        Line::from("This file changed outside MarkR while editing."),
+        Line::from("Choose how to continue:"),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("o / Enter", theme.accent()),
+            Span::styled(" overwrite  ", theme.muted()),
+            Span::styled("r", theme.accent()),
+            Span::styled(" reload  ", theme.muted()),
+            Span::styled("Esc", theme.accent()),
+            Span::styled(" back", theme.muted()),
         ]),
     ]);
     frame.render_widget(Clear, area);
@@ -1192,6 +1285,63 @@ mod tests {
                 .draw(|frame| super::render(frame, &app))
                 .expect("render responsive shell");
         }
+    }
+
+    #[test]
+    fn renders_editor_syntax_and_unsaved_prompt() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+        app.update(Message::Key {
+            key: crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('e'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            at: Instant::now(),
+        });
+        app.update(Message::Key {
+            key: crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::End,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            at: Instant::now(),
+        });
+        app.update(Message::Key {
+            key: crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('!'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            at: Instant::now(),
+        });
+        app.update(Message::Key {
+            key: crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            at: Instant::now(),
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| super::render(frame, &app))
+            .expect("render editor prompt");
+        let rendered =
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .fold(String::new(), |mut output, cell| {
+                    output.push_str(cell.symbol());
+                    output
+                });
+
+        assert!(rendered.contains("UNSAVED CHANGES"));
     }
 
     #[test]

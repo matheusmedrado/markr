@@ -129,4 +129,12 @@ mod tests {
 
         assert_ne!(foregrounds(&dark), foregrounds(&light));
     }
+
+    #[test]
+    fn highlights_markdown_sources_for_the_editor() {
+        let lines = highlight(Some("markdown"), "# Title\n**bold**\n", Theme::default());
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().flatten().count() > 2);
+    }
 }
