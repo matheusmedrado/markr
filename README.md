@@ -28,6 +28,7 @@ The current version can:
 - switch between documents without leaving the workspace;
 - search the rendered document with visible highlights for every match and a distinct active result;
 - select and copy text inside the reader with the keyboard or mouse;
+- enter a raw Markdown editor for the active file, edit with familiar cursor controls and save with `Ctrl-S`;
 - start with one of three built-in color themes and switch palettes without restarting;
 - use familiar arrow-key controls alongside a small set of vim-inspired shortcuts;
 - capture mouse input to support selection inside the reader.
@@ -103,6 +104,9 @@ When a directory is provided, MarkR recursively discovers files with the `.md`, 
 | `/` | Search the rendered document |
 | `Enter` / `Esc` while searching | Confirm / cancel the search |
 | `n` / `N` | Next / previous highlighted search match |
+| `e` | Edit the active Markdown file |
+| `Ctrl-S` in the editor | Save edits and refresh the rendered document |
+| `Esc` in the editor | Cancel edits and return to the reader |
 | `v` | Start a keyboard selection in the reader |
 | `←` / `→`, `↑` / `↓`, `h` / `j` / `k` / `l` while selecting | Extend the selection |
 | `y` | Copy the selection to the clipboard |
@@ -164,9 +168,10 @@ The short-term roadmap includes:
 - add terminal hyperlinks and lightweight document diagnostics;
 - improve performance for very large documents and workspaces;
 - support more Markdown extensions where the terminal allows it;
-- explore editing and richer authoring workflows after the reader experience is solid.
+- grow the initial raw-source editor into a richer authoring workflow.
 
-The reader comes first. A tool that cannot make reading pleasant has no business trying to become an editor, or a small operating system with a Markdown hobby.
+The reader remains the default. Editing starts as a focused raw-source mode so authoring can grow
+without making the reading experience feel like a small operating system with a Markdown hobby.
 
 ## Development
 

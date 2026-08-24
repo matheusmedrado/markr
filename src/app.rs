@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_image::picker::Picker;
 
+use crate::editor::EditorBuffer;
 use crate::explorer::{Activation, FileExplorer};
 use crate::images::ImageStore;
 use crate::layout;
@@ -110,6 +111,9 @@ pub struct App {
     pub terminal_width: u16,
     pub terminal_height: u16,
     pub error: Option<String>,
+    pub editor: Option<EditorBuffer>,
+    pub editor_scroll: usize,
+    pub editor_horizontal_scroll: usize,
     pub search_query: String,
     pub search_input: Option<String>,
     search_matches: Vec<SearchMatch>,
@@ -142,6 +146,11 @@ struct UiSnapshot {
     sidebar_visible: bool,
     help_visible: bool,
     error: Option<String>,
+    editor_text: Option<String>,
+    editor_cursor: Option<CursorPosition>,
+    editor_scroll: usize,
+    editor_horizontal_scroll: usize,
+    editor_dirty: bool,
     search_query: String,
     search_input: Option<String>,
     search_selected: usize,
@@ -182,6 +191,9 @@ impl App {
             terminal_width,
             terminal_height: 40,
             error: None,
+            editor: None,
+            editor_scroll: 0,
+            editor_horizontal_scroll: 0,
             search_query: String::new(),
             search_input: None,
             search_matches: Vec::new(),
@@ -213,6 +225,33 @@ impl App {
 
     pub fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    pub fn is_editing(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    pub fn editor_lines(&self) -> &[String] {
+        self.editor.as_ref().map(EditorBuffer::lines).unwrap_or(&[])
+    }
+
+    pub fn editor_cursor(&self) -> Option<CursorPosition> {
+        self.editor.as_ref().map(EditorBuffer::cursor)
+    }
+
+    pub fn editor_cursor_display_column(&self) -> Option<usize> {
+        self.editor
+            .as_ref()
+            .map(EditorBuffer::cursor_display_column)
+    }
+
+    pub fn editor_dirty(&self) -> bool {
+        self.editor.as_ref().is_some_and(EditorBuffer::dirty)
+    }
+
+    pub fn editor_content_width(&self) -> usize {
+        let line_number_width = self.editor_lines().len().max(1).to_string().len();
+        usize::from(self.document_width()).saturating_sub(line_number_width + 3)
     }
 
     pub fn document_width(&self) -> u16 {
@@ -403,6 +442,7 @@ impl App {
                 self.refresh_search();
                 self.clamp_selection();
                 self.clamp_scroll();
+                self.ensure_editor_cursor_visible();
                 true
             }
             Message::Frame { at } => {
@@ -434,6 +474,11 @@ impl App {
             sidebar_visible: self.sidebar_visible,
             help_visible: self.help_visible,
             error: self.error.clone(),
+            editor_text: self.editor.as_ref().map(EditorBuffer::text),
+            editor_cursor: self.editor_cursor(),
+            editor_scroll: self.editor_scroll,
+            editor_horizontal_scroll: self.editor_horizontal_scroll,
+            editor_dirty: self.editor_dirty(),
             search_query: self.search_query.clone(),
             search_input: self.search_input.clone(),
             search_selected: self.search_selected,
@@ -464,7 +509,13 @@ impl App {
             return;
         }
 
+        if self.is_editing() {
+            self.handle_editor_key(key, at);
+            return;
+        }
+
         match key.code {
+            KeyCode::Char('e') if self.focus == Focus::Document => self.enter_editor(at),
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.set_help_visible(true, at),
             KeyCode::Char('/') => self.search_input = Some(self.search_query.clone()),
@@ -563,6 +614,130 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_editor_key(&mut self, key: KeyEvent, at: Instant) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+            self.save_editor(at);
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc => self.cancel_editor(at),
+            KeyCode::Left => self.editor_move(|editor| editor.move_left()),
+            KeyCode::Right => self.editor_move(|editor| editor.move_right()),
+            KeyCode::Up => self.editor_move(|editor| editor.move_up()),
+            KeyCode::Down => self.editor_move(|editor| editor.move_down()),
+            KeyCode::Home => self.editor_move(|editor| editor.move_home()),
+            KeyCode::End => self.editor_move(|editor| editor.move_end()),
+            KeyCode::PageUp => self.editor_move(|editor| {
+                for _ in 0..10 {
+                    editor.move_up();
+                }
+            }),
+            KeyCode::PageDown => self.editor_move(|editor| {
+                for _ in 0..10 {
+                    editor.move_down();
+                }
+            }),
+            KeyCode::Backspace => self.editor_move(|editor| editor.backspace()),
+            KeyCode::Delete => self.editor_move(|editor| editor.delete()),
+            KeyCode::Enter => self.editor_move(|editor| editor.insert('\n')),
+            KeyCode::Tab => self.editor_move(|editor| {
+                for _ in 0..4 {
+                    editor.insert(' ');
+                }
+            }),
+            KeyCode::Char(character)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.editor_move(|editor| editor.insert(character));
+            }
+            _ => {}
+        }
+        self.ensure_editor_cursor_visible();
+    }
+
+    fn editor_move(&mut self, action: impl FnOnce(&mut EditorBuffer)) {
+        if let Some(editor) = self.editor.as_mut() {
+            action(editor);
+        }
+    }
+
+    fn ensure_editor_cursor_visible(&mut self) {
+        let Some(cursor) = self.editor_cursor() else {
+            self.editor_scroll = 0;
+            return;
+        };
+        let height = self.document_height().max(1);
+        if cursor.line < self.editor_scroll {
+            self.editor_scroll = cursor.line;
+        } else if cursor.line >= self.editor_scroll.saturating_add(height) {
+            self.editor_scroll = cursor.line.saturating_sub(height.saturating_sub(1));
+        }
+        let width = self.editor_content_width().max(1);
+        let column = self.editor_cursor_display_column().unwrap_or_default();
+        if column < self.editor_horizontal_scroll {
+            self.editor_horizontal_scroll = column;
+        } else if column >= self.editor_horizontal_scroll.saturating_add(width) {
+            self.editor_horizontal_scroll = column.saturating_sub(width.saturating_sub(1));
+        }
+    }
+
+    fn enter_editor(&mut self, at: Instant) {
+        let Some(path) = self.workspace.active_path() else {
+            self.set_message("stdin content is read-only", at);
+            return;
+        };
+        let path_display = path.display().to_string();
+        match self.workspace.reload_content() {
+            Ok(content) => {
+                self.editor = Some(EditorBuffer::from_text(&content));
+                self.editor_scroll = 0;
+                self.editor_horizontal_scroll = 0;
+                self.clear_selection();
+                self.clear_search();
+                self.focus = Focus::Document;
+                self.set_message(
+                    format!("editing {path_display} · Ctrl-S save · Esc cancel"),
+                    at,
+                );
+            }
+            Err(error) => {
+                let message = format!("Cannot edit file: {error}");
+                self.error = Some(message.clone());
+                self.set_message(message, at);
+            }
+        }
+    }
+
+    fn save_editor(&mut self, at: Instant) {
+        let Some(content) = self.editor.as_ref().map(EditorBuffer::text) else {
+            return;
+        };
+        match self.workspace.save_content(&content) {
+            Ok(()) => {
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.mark_clean();
+                }
+                self.apply_document_content(&content);
+                self.set_message("saved", at);
+            }
+            Err(error) => {
+                let message = format!("Cannot save file: {error}");
+                self.error = Some(message.clone());
+                self.set_message(message, at);
+            }
+        }
+    }
+
+    fn cancel_editor(&mut self, at: Instant) {
+        self.editor = None;
+        self.editor_scroll = 0;
+        self.editor_horizontal_scroll = 0;
+        self.load_active_file();
+        self.set_message("edit cancelled", at);
     }
 
     fn handle_mouse(&mut self, event: crossterm::event::MouseEvent, at: Instant) {
@@ -1031,6 +1206,9 @@ impl App {
     }
 
     fn reload_if_changed(&mut self) -> bool {
+        if self.is_editing() {
+            return false;
+        }
         let current_modified = modified_time(self.workspace.active_path());
         if current_modified.is_some() && current_modified != self.last_modified {
             self.load_active_file();
@@ -1041,23 +1219,28 @@ impl App {
     }
 
     fn load_active_file(&mut self) {
+        self.editor = None;
+        self.editor_scroll = 0;
+        self.editor_horizontal_scroll = 0;
         match self.workspace.reload_content() {
-            Ok(content) => {
-                self.document = Document::parse(&content);
-                self.outline_selected = self
-                    .outline_selected
-                    .min(self.document.outline.len().saturating_sub(1));
-                self.last_modified = modified_time(self.workspace.active_path());
-                self.error = None;
-                let dir = document_dir(&self.workspace);
-                self.images.load(dir.as_deref(), &self.document);
-                self.rebuild_layout();
-                self.clear_selection();
-                self.clear_search();
-                self.clamp_scroll();
-            }
+            Ok(content) => self.apply_document_content(&content),
             Err(error) => self.error = Some(error.to_string()),
         }
+    }
+
+    fn apply_document_content(&mut self, content: &str) {
+        self.document = Document::parse(content);
+        self.outline_selected = self
+            .outline_selected
+            .min(self.document.outline.len().saturating_sub(1));
+        self.last_modified = modified_time(self.workspace.active_path());
+        self.error = None;
+        let dir = document_dir(&self.workspace);
+        self.images.load(dir.as_deref(), &self.document);
+        self.rebuild_layout();
+        self.clear_selection();
+        self.clear_search();
+        self.clamp_scroll();
     }
 
     fn clear_search(&mut self) {
@@ -1142,7 +1325,9 @@ fn modified_time(path: Option<&Path>) -> Option<SystemTime> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -1159,9 +1344,27 @@ mod tests {
         App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app")
     }
 
+    fn temporary_document() -> (PathBuf, App) {
+        static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("markr-editor-{}-{id}.md", std::process::id()));
+        fs::write(&path, "# One").expect("editor fixture");
+        let workspace = Workspace::open(Some(path.clone()), true).expect("workspace");
+        let app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
+        (path, app)
+    }
+
     fn key(code: KeyCode) -> Message {
         Message::Key {
             key: KeyEvent::new(code, KeyModifiers::NONE),
+            at: Instant::now(),
+        }
+    }
+
+    fn control_key(code: KeyCode) -> Message {
+        Message::Key {
+            key: KeyEvent::new(code, KeyModifiers::CONTROL),
             at: Instant::now(),
         }
     }
@@ -1248,6 +1451,44 @@ mod tests {
         let lines = vec![Line::from("A calm document")];
 
         assert!(find_matches(&lines, "").is_empty());
+    }
+
+    #[test]
+    fn edits_saves_and_rebuilds_the_active_document() {
+        let (path, mut app) = temporary_document();
+
+        app.update(key(KeyCode::Char('e')));
+        assert!(app.is_editing());
+        app.update(key(KeyCode::End));
+        app.update(key(KeyCode::Char('!')));
+        assert!(app.editor_dirty());
+
+        app.update(control_key(KeyCode::Char('s')));
+
+        assert_eq!(fs::read_to_string(&path).expect("saved document"), "# One!");
+        assert!(!app.editor_dirty());
+        assert_eq!(app.document.outline[0].title, "One!");
+
+        app.update(key(KeyCode::Esc));
+        assert!(!app.is_editing());
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn cancelling_edits_leaves_the_file_unchanged() {
+        let (path, mut app) = temporary_document();
+
+        app.update(key(KeyCode::Char('e')));
+        app.update(key(KeyCode::End));
+        app.update(key(KeyCode::Char('!')));
+        app.update(key(KeyCode::Esc));
+
+        assert!(!app.is_editing());
+        assert_eq!(
+            fs::read_to_string(&path).expect("original document"),
+            "# One"
+        );
+        fs::remove_file(path).expect("remove editor fixture");
     }
 
     #[test]
