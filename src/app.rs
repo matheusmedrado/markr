@@ -622,6 +622,31 @@ impl App {
             return;
         }
 
+        let page_amount = self.document_height().saturating_sub(1).max(1);
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('u') => {
+                    self.editor_move(|editor| {
+                        for _ in 0..page_amount {
+                            editor.move_up();
+                        }
+                    });
+                    self.ensure_editor_cursor_visible();
+                    return;
+                }
+                KeyCode::Char('d') => {
+                    self.editor_move(|editor| {
+                        for _ in 0..page_amount {
+                            editor.move_down();
+                        }
+                    });
+                    self.ensure_editor_cursor_visible();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Esc => self.cancel_editor(at),
             KeyCode::Left => self.editor_move(|editor| editor.move_left()),
@@ -631,12 +656,12 @@ impl App {
             KeyCode::Home => self.editor_move(|editor| editor.move_home()),
             KeyCode::End => self.editor_move(|editor| editor.move_end()),
             KeyCode::PageUp => self.editor_move(|editor| {
-                for _ in 0..10 {
+                for _ in 0..page_amount {
                     editor.move_up();
                 }
             }),
             KeyCode::PageDown => self.editor_move(|editor| {
-                for _ in 0..10 {
+                for _ in 0..page_amount {
                     editor.move_down();
                 }
             }),
@@ -749,10 +774,18 @@ impl App {
 
         match event.kind {
             MouseEventKind::ScrollUp if self.mouse_is_over_reader(event.column, event.row) => {
-                self.move_up(at);
+                if self.is_editing() {
+                    self.editor_scroll_up();
+                } else {
+                    self.move_up(at);
+                }
             }
             MouseEventKind::ScrollDown if self.mouse_is_over_reader(event.column, event.row) => {
-                self.move_down(at);
+                if self.is_editing() {
+                    self.editor_scroll_down();
+                } else {
+                    self.move_down(at);
+                }
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(position) = self.document_position_at(event.column, event.row) {
@@ -1084,6 +1117,18 @@ impl App {
             Focus::Document => self.scroll = self.scroll.saturating_add(1),
         }
         self.selection_transition = Transition::new(0.0, 1.0, at, Duration::from_millis(90));
+    }
+
+    fn editor_scroll_up(&mut self) {
+        self.editor_scroll = self.editor_scroll.saturating_sub(1);
+    }
+
+    fn editor_scroll_down(&mut self) {
+        let max_scroll = self
+            .editor_lines()
+            .len()
+            .saturating_sub(self.document_height());
+        self.editor_scroll = self.editor_scroll.saturating_add(1).min(max_scroll);
     }
 
     fn page_up(&mut self) {
@@ -1587,6 +1632,26 @@ mod tests {
 
         app.update(key(KeyCode::Tab));
         app.update(mouse(MouseEventKind::ScrollDown, 5, 3));
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_the_editor_viewport() {
+        let mut app = readme_app();
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+        app.update(key(KeyCode::Char('e')));
+        assert!(app.editor_lines().len() > app.document_height());
+
+        app.update(mouse(MouseEventKind::ScrollDown, 35, 3));
+        assert_eq!(app.editor_scroll, 1);
+        assert_eq!(app.scroll, 0);
+
+        app.update(mouse(MouseEventKind::ScrollUp, 35, 3));
+        assert_eq!(app.editor_scroll, 0);
         assert_eq!(app.scroll, 0);
     }
 

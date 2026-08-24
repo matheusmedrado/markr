@@ -95,6 +95,7 @@ When a directory is provided, MarkR recursively discovers files with the `.md`, 
 | `[` / `]` | Previous / next Markdown file |
 | `g` / `G` | Go to the top / bottom |
 | `Ctrl-u` / `Ctrl-d` | Page up / down |
+| Mouse wheel | Scroll the reader or editor viewport |
 | `t` | Toggle the sidebar |
 | `T` | Cycle through the built-in color themes |
 | `1` / `2` | Switch between outline and files |
