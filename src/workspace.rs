@@ -88,6 +88,16 @@ impl Workspace {
         }
     }
 
+    pub fn save_content(&self, content: &str) -> io::Result<()> {
+        let Some(path) = self.active_path() else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "stdin content cannot be saved",
+            ));
+        };
+        fs::write(path, content)
+    }
+
     pub fn explorer_start_directory(&self) -> io::Result<PathBuf> {
         self.root.clone().map_or_else(std::env::current_dir, Ok)
     }
