@@ -2,7 +2,7 @@ use std::ops::Range;
 use std::time::Instant;
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
@@ -222,6 +222,11 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let title = Line::from(vec![
         Span::styled("▰ MARKR", theme.accent()),
         Span::styled("  /  ", theme.muted()),
+        if app.is_editing() {
+            Span::styled("✎ EDIT  /  ", theme.accent())
+        } else {
+            Span::raw("")
+        },
         Span::styled(app.workspace.display_name(), theme.title()),
     ]);
     frame.render_widget(Paragraph::new(title), area);
@@ -296,6 +301,10 @@ fn render_reader(frame: &mut Frame, app: &App, document_area: Rect) {
         document_area,
     );
     let inner = FloatingReader::inner(document_area);
+    if app.is_editing() {
+        render_editor(frame, app, inner);
+        return;
+    }
     let start = app.scroll.min(app.document_layout.lines.len());
     let end = start.saturating_add(usize::from(inner.height));
     let selection_range = app
@@ -354,6 +363,78 @@ fn render_reader(frame: &mut Frame, app: &App, document_area: Rect) {
             frame.render_widget(SlicedImage::new(protocol, position), inner);
         }
     }
+}
+
+fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let theme = app.theme;
+    let lines = app.editor_lines();
+    let cursor = app.editor_cursor();
+    let line_number_width = lines.len().max(1).to_string().len();
+    let prefix_width = line_number_width.saturating_add(3);
+    let visible_width = app.editor_content_width();
+    let horizontal_scroll = app.editor_horizontal_scroll;
+    let start = app.editor_scroll.min(lines.len());
+    let visible_lines = lines.iter().skip(start).take(usize::from(inner.height));
+    let text = visible_lines
+        .enumerate()
+        .map(|(line_index, line)| {
+            let absolute_line = start + line_index;
+            let is_cursor_line = cursor.is_some_and(|cursor| cursor.line == absolute_line);
+            let line_number_style = if is_cursor_line {
+                theme.accent()
+            } else {
+                theme.muted()
+            };
+            let prefix = format!(
+                "{:>line_number_width$} │ ",
+                absolute_line + 1,
+                line_number_width = line_number_width
+            );
+            let content = selection::slice_by_columns(
+                line,
+                horizontal_scroll,
+                horizontal_scroll.saturating_add(visible_width),
+            );
+            Line::from(vec![
+                Span::styled(prefix, line_number_style),
+                Span::styled(content, Style::default().fg(theme.text)),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(Text::from(text))
+            .style(Style::default().fg(theme.text).bg(theme.reader_background)),
+        inner,
+    );
+
+    let Some(cursor) = cursor else {
+        return;
+    };
+    if cursor.line < start
+        || cursor.line >= lines.len()
+        || cursor.line >= start.saturating_add(usize::from(inner.height))
+    {
+        return;
+    }
+    let cursor_column = app
+        .editor_cursor_display_column()
+        .unwrap_or_default()
+        .saturating_sub(horizontal_scroll)
+        .min(visible_width);
+    let x = inner
+        .x
+        .saturating_add(prefix_width as u16)
+        .saturating_add(cursor_column as u16)
+        .min(inner.right().saturating_sub(1));
+    let y = inner
+        .y
+        .saturating_add(cursor.line.saturating_sub(start) as u16);
+    frame.set_cursor_position(Position::new(x, y));
 }
 
 fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
@@ -683,6 +764,22 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         ])
     } else if let Some(message) = app.temporary_message(Instant::now()) {
         Line::from(Span::styled(message, theme.accent()))
+    } else if app.is_editing() {
+        Line::from(vec![
+            Span::styled("EDIT", theme.accent()),
+            Span::styled(
+                if app.editor_dirty() {
+                    "  unsaved changes  "
+                } else {
+                    "  saved  "
+                },
+                theme.muted(),
+            ),
+            Span::styled("Ctrl-S", theme.accent()),
+            Span::styled(" save  ", theme.muted()),
+            Span::styled("Esc", theme.accent()),
+            Span::styled(" cancel", theme.muted()),
+        ])
     } else if let Some((current, total)) = app.search_result_position() {
         Line::from(vec![
             Span::styled(format!("/{}", app.search_query), theme.accent()),
@@ -727,7 +824,14 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             app.workspace.files.len()
         )
     };
-    let right = if let Some((current, total)) = app.search_result_position() {
+    let right = if let Some(cursor) = app.editor_cursor() {
+        format!(
+            "{} · line {}, column {}",
+            file_number,
+            cursor.line + 1,
+            cursor.column + 1
+        )
+    } else if let Some((current, total)) = app.search_result_position() {
         format!("search {current}/{total} · {file_number}")
     } else {
         format!("{} · line {}", file_number, app.scroll.saturating_add(1))
@@ -766,6 +870,9 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from(" Enter / l      open file or directory"),
         Line::from(" h / Backspace  explorer parent directory"),
         Line::from(" r              refresh explorer"),
+        Line::from(" e              edit the active file"),
+        Line::from(" Ctrl-S         save edits"),
+        Line::from(" Esc            cancel edits"),
         Line::from(" /              search rendered text"),
         Line::from(" n / N          next / previous match"),
         Line::from(" v              start keyboard selection"),
