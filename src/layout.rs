@@ -29,7 +29,10 @@ impl DocumentLayout {
     }
 }
 
-pub const MAX_CONTENT_WIDTH: usize = 88;
+/// The measure, in columns. Eighty is the terminal's own convention and keeps
+/// prose near the comfortable reading length; capping here also buys real side
+/// margins once the terminal is wider than the column.
+pub const MAX_CONTENT_WIDTH: usize = 80;
 
 /// Columns reserved at the left of every reader line: two of padding, the
 /// heading-level tick, then one space before the text begins.
@@ -90,18 +93,13 @@ pub fn build(document: &Document, width: u16, theme: Theme, images: &ImageStore)
                     theme,
                     &mut lines,
                 );
-                // H1 and H2 both close with a rule, as they do on the web; the
-                // weight of the rule is what separates them.
-                match *level {
-                    1 => lines.push(Line::from(Span::styled(
-                        "▁".repeat(max_width),
-                        Style::default().fg(theme.accent_soft),
-                    ))),
-                    2 => lines.push(Line::from(Span::styled(
+                // H1 and H2 close with the same hairline rule, as they do on
+                // the web. H1 is set apart by its colour, not by a louder rule.
+                if matches!(*level, 1 | 2) {
+                    lines.push(Line::from(Span::styled(
                         "─".repeat(max_width),
                         Style::default().fg(theme.reader_border),
-                    ))),
-                    _ => {}
+                    )));
                 }
             }
             Block::Paragraph {
@@ -192,8 +190,11 @@ pub fn build(document: &Document, width: u16, theme: Theme, images: &ImageStore)
     let indent = " ".repeat(margin);
     for (index, line) in lines.iter_mut().enumerate() {
         let tick = match ticks.get(index).copied().flatten() {
-            Some(level) => Span::styled("▌", Style::default().fg(heading_tick(level, theme))),
-            None => Span::raw(" "),
+            // A rule already marks H1 and H2; a tick as well marks them twice.
+            Some(level) if level >= 3 => {
+                Span::styled("▌", Style::default().fg(heading_tick(level, theme)))
+            }
+            _ => Span::raw(" "),
         };
         line.spans.insert(0, Span::raw(" "));
         line.spans.insert(0, tick);
@@ -502,9 +503,12 @@ fn render_table(
         .skip(first_body_row)
         .map(|row| table_row(row, &widths, Style::default().fg(theme.text)))
         .collect::<Vec<_>>();
-    // Once any record needs two lines, records need air between them or the
-    // table reads as one block of text.
-    let records_wrap = body.iter().any(|record| record.len() > 1);
+    let rule = |color| {
+        Line::from(Span::styled(
+            "─".repeat(ruled_width),
+            Style::default().fg(color),
+        ))
+    };
 
     if !headers.is_empty() {
         lines.extend(table_row(
@@ -512,14 +516,14 @@ fn render_table(
             &widths,
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ));
-        lines.push(Line::from(Span::styled(
-            "─".repeat(ruled_width),
-            Style::default().fg(theme.reader_border),
-        )));
+        lines.push(rule(theme.border));
     }
+    // Every record is separated by a hairline. Whitespace alone is not enough
+    // to track a row across a wide column gap, and it fails outright once a
+    // cell wraps onto a second line.
     for (index, record) in body.into_iter().enumerate() {
-        if records_wrap && index > 0 {
-            lines.push(Line::default());
+        if index > 0 {
+            lines.push(rule(theme.reader_border));
         }
         lines.extend(record);
     }
@@ -543,12 +547,25 @@ fn table_column_widths(rows: &[Vec<String>], max_width: usize) -> Vec<usize> {
     let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
     let mut widths = (0..column_count)
         .map(|column| {
-            rows.iter()
+            let mut cells = rows
+                .iter()
                 .filter_map(|row| row.get(column))
                 .map(|cell| text_width(cell.as_str()))
-                .max()
-                .unwrap_or(1)
-                .max(1)
+                .collect::<Vec<_>>();
+            if cells.is_empty() {
+                return 1;
+            }
+            let natural = cells.iter().copied().max().unwrap_or(1).max(1);
+            cells.sort_unstable();
+            let median = cells[cells.len() / 2];
+            let header = rows
+                .first()
+                .and_then(|row| row.get(column))
+                .map(|cell| text_width(cell.as_str()))
+                .unwrap_or(0);
+            // One long outlier should wrap rather than hold the whole column
+            // open and leave a channel of whitespace beside every other row.
+            natural.min(median.saturating_mul(2).max(header).max(MIN_COLUMN))
         })
         .collect::<Vec<_>>();
     let budget = max_width
@@ -693,12 +710,11 @@ fn inline_style(style: InlineStyle, link: bool, base: Style, theme: Theme) -> St
     result
 }
 
-/// Heading level is carried by a tick in the left gutter rather than by a
-/// prefix glyph inside the text, so the measure stays flush.
+/// Sub-headings below the ruled levels are marked by a tick in the left gutter
+/// rather than by a prefix glyph inside the text, so the measure stays flush.
 fn heading_tick(level: u8, theme: Theme) -> ratatui::style::Color {
     match level {
-        1 => theme.accent,
-        2 => theme.accent_soft,
+        3 => theme.accent_soft,
         _ => theme.border,
     }
 }
@@ -796,16 +812,27 @@ mod tests {
             &ImageStore::default(),
         );
 
-        // The level shows in the gutter tick, never as a glyph in the text.
+        // The marker never appears as a glyph in the text.
         assert_eq!(measure(&layout, 0), "Title");
-        assert_eq!(measure(&layout, 1), "▁".repeat(12));
+        assert_eq!(measure(&layout, 1), "─".repeat(12));
+        assert!(
+            !layout.lines[0].spans.iter().any(|span| span.content == "▌"),
+            "a ruled heading should not also carry a gutter tick"
+        );
 
+        // A sub-heading has no rule, so the gutter tick marks it instead.
+        let layout = build(
+            &Document::parse("### Sub"),
+            reader_width(12),
+            theme,
+            &ImageStore::default(),
+        );
         let tick = layout.lines[0]
             .spans
             .iter()
             .find(|span| span.content == "▌")
-            .expect("a gutter tick on the heading");
-        assert_eq!(tick.style.fg, Some(theme.accent));
+            .expect("a gutter tick on the sub-heading");
+        assert_eq!(tick.style.fg, Some(theme.accent_soft));
     }
 
     #[test]
@@ -944,37 +971,30 @@ mod tests {
     }
 
     #[test]
-    fn rules_both_h1_and_h2_with_different_weights() {
+    fn closes_h1_and_h2_with_a_hairline_rule() {
         let theme = Theme::default();
         let layout = build(
-            &Document::parse("# One\n\n## Two"),
+            &Document::parse("# One\n\n## Two\n\n### Three"),
             reader_width(12),
             theme,
             &ImageStore::default(),
         );
-        let lines = measures(&layout);
 
-        let h1_rule = lines
+        // H1 and H2 each close with the same quiet rule; H1 is set apart by its
+        // colour, not by a louder one. H3 gets no rule at all.
+        let rules = layout
+            .lines
             .iter()
-            .find(|line| line.starts_with('▁'))
-            .expect("a rule under H1");
-        let h2_rule = lines
-            .iter()
-            .find(|line| line.starts_with('─'))
-            .expect("a rule under H2");
-        assert_eq!(h1_rule.chars().count(), 12);
-        assert_eq!(h2_rule.chars().count(), 12);
-
-        let rule_colour = |needle: char| {
-            layout
-                .lines
-                .iter()
-                .find(|line| measure_of(line, layout.content_margin).starts_with(needle))
-                .and_then(|line| line.spans.last())
-                .and_then(|span| span.style.fg)
-        };
-        assert_eq!(rule_colour('▁'), Some(theme.accent_soft));
-        assert_eq!(rule_colour('─'), Some(theme.reader_border));
+            .filter(|line| measure_of(line, layout.content_margin).starts_with('─'))
+            .collect::<Vec<_>>();
+        assert_eq!(rules.len(), 2);
+        for rule in rules {
+            assert_eq!(measure_of(rule, layout.content_margin).chars().count(), 12);
+            assert_eq!(
+                rule.spans.last().expect("rule span").style.fg,
+                Some(theme.reader_border)
+            );
+        }
     }
 
     #[test]
@@ -997,21 +1017,31 @@ mod tests {
     }
 
     #[test]
-    fn rules_the_table_header_in_the_hairline_colour() {
+    fn rules_the_table_header_and_every_record() {
         let theme = Theme::default();
-        let document = Document::parse("| Name | Value |\n| --- | --- |\n| MarkR | reader |");
+        let document = Document::parse(
+            "| Name | Value |\n| --- | --- |\n| MarkR | reader |\n| Ratatui | widgets |",
+        );
         let layout = build(&document, reader_width(40), theme, &ImageStore::default());
 
-        let rule = layout
+        let rules = layout
             .lines
             .iter()
-            .find(|line| {
+            .filter(|line| {
                 let text = measure_of(line, layout.content_margin);
                 !text.is_empty() && text.chars().all(|character| character == '─')
             })
-            .expect("a rule under the header");
+            .collect::<Vec<_>>();
+
+        // One under the header, then one between each pair of records: reading
+        // across a wide column gap needs more than whitespace to follow.
+        assert_eq!(rules.len(), 2);
         assert_eq!(
-            rule.spans.last().expect("rule span").style.fg,
+            rules[0].spans.last().expect("header rule").style.fg,
+            Some(theme.border)
+        );
+        assert_eq!(
+            rules[1].spans.last().expect("record rule").style.fg,
             Some(theme.reader_border)
         );
 
@@ -1036,11 +1066,11 @@ mod tests {
             Theme::default(),
             &ImageStore::default(),
         );
-        // 120 columns, less the gutter and pad, leaves 114 for an 88 column
-        // measure, so 13 of centring sit outside the gutter.
+        // 120 columns, less the gutter and pad, leaves 114 for an 80 column
+        // measure, so 17 of centring sit outside the gutter.
         let margin = (120 - GUTTER_WIDTH - RIGHT_PAD - super::MAX_CONTENT_WIDTH) / 2;
 
-        assert_eq!(margin, 13);
+        assert_eq!(margin, 17);
         assert_eq!(layout.content_margin, margin + GUTTER_WIDTH);
         assert_eq!(layout.lines[0].spans[0].content, " ".repeat(margin));
     }
