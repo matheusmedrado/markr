@@ -242,11 +242,25 @@ impl Document {
                         }
                     }
                 }
+                // A soft break is a wrapped source line, not a line break in the
+                // prose: it reflows as a space so paragraphs fill the measure.
+                // Only an explicit hard break survives to the renderer.
                 Event::SoftBreak | Event::HardBreak => {
+                    let separator = if matches!(event, Event::HardBreak) {
+                        "\n"
+                    } else {
+                        " "
+                    };
                     if let Some(work) = images.last_mut() {
                         work.alt.push(' ');
                     } else {
-                        append_text(&mut current, "\n", style, link.clone(), &mut table_context);
+                        append_text(
+                            &mut current,
+                            separator,
+                            style,
+                            link.clone(),
+                            &mut table_context,
+                        );
                     }
                 }
                 Event::Rule => blocks.push(Block::ThematicBreak),
@@ -552,5 +566,22 @@ mod tests {
         };
         assert_eq!(src, "assets/logo.png");
         assert_eq!(alt, "Logo");
+    }
+
+    #[test]
+    fn reflows_soft_breaks_and_keeps_hard_ones() {
+        // A wrapped source line is not a line break in the prose.
+        let document = Document::parse("one\ntwo");
+        let Block::Paragraph { content, .. } = &document.blocks[0] else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(super::inline_text(content), "one two");
+
+        // Two trailing spaces are an explicit break and survive.
+        let document = Document::parse("one  \ntwo");
+        let Block::Paragraph { content, .. } = &document.blocks[0] else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(super::inline_text(content), "one\ntwo");
     }
 }
