@@ -29,14 +29,10 @@ impl DocumentLayout {
     }
 }
 
-/// The width prose settles at once the terminal has room for it. Eighty is the
-/// terminal's own convention and sits mid-way through the comfortable reading
-/// range.
-pub const COMFORTABLE_MEASURE: usize = 80;
-
-/// The ceiling. Past this a line is long enough that the eye starts losing the
-/// return sweep, and the terminal's extra width is better spent on margin.
-pub const MAX_MEASURE: usize = 110;
+/// The ceiling on the measure. The reader otherwise fills whatever the terminal
+/// gives it; this is a guard rail for an ultrawide window, set high enough that
+/// an ordinary maximised terminal never reaches it.
+pub const MAX_MEASURE: usize = 200;
 
 /// Columns left for the measure and its centring once the gutter and the right
 /// pad are taken out.
@@ -48,16 +44,12 @@ fn available_width(width: u16) -> usize {
 
 /// The reading measure for a reader `width` columns wide.
 ///
-/// Below the comfortable width the reader takes everything it is given. Above
-/// it the measure keeps growing — a wide terminal should not leave two thirds
-/// of itself empty — but at half the terminal's rate, so lines stay trackable
-/// and the margins widen alongside the text.
+/// The reader takes every column it is given, less the gutter and the right
+/// pad, up to [`MAX_MEASURE`]. Growing more slowly than the terminal would be
+/// kinder to the eye, but it leaves a window's worth of empty margin on a wide
+/// terminal, which is not what a terminal reader is for.
 pub fn measure_for(width: u16) -> usize {
-    let available = available_width(width);
-    if available <= COMFORTABLE_MEASURE {
-        return available;
-    }
-    (COMFORTABLE_MEASURE + (available - COMFORTABLE_MEASURE) / 2).min(MAX_MEASURE)
+    available_width(width).min(MAX_MEASURE)
 }
 
 /// Columns reserved at the left of every reader line: two of padding, the
@@ -764,8 +756,7 @@ mod tests {
     use ratatui::text::Line;
 
     use super::{
-        COMFORTABLE_MEASURE, DocumentLayout, GUTTER_WIDTH, MAX_MEASURE, RIGHT_PAD, build,
-        measure_for, text_width,
+        DocumentLayout, GUTTER_WIDTH, MAX_MEASURE, RIGHT_PAD, build, measure_for, text_width,
     };
     use crate::images::{Asset, ImageStore};
     use crate::markdown::Document;
@@ -779,15 +770,14 @@ mod tests {
     }
 
     #[test]
-    fn the_measure_grows_with_the_terminal_but_more_slowly_than_it() {
-        // Narrow: take every column there is.
+    fn the_measure_fills_the_terminal_up_to_the_ceiling() {
+        // Every spare column goes to the text, at any ordinary width.
         assert_eq!(measure_for(60), 54);
-        // At the comfortable width, exactly the terminal.
-        assert_eq!(measure_for(86), 80);
-        // Wider: keep growing, at half the terminal's rate.
-        assert_eq!(measure_for(120), 97);
-        // Very wide: stop before lines get tiring and let margin take the rest.
-        assert_eq!(measure_for(260), MAX_MEASURE);
+        assert_eq!(measure_for(120), 114);
+        assert_eq!(measure_for(200), 194);
+        assert_eq!(measure_for(206), MAX_MEASURE);
+        // Only an ultrawide window has anything left over.
+        assert_eq!(measure_for(400), MAX_MEASURE);
     }
 
     /// One laid out line with its gutter stripped, as the measure reads it.
@@ -1098,18 +1088,25 @@ mod tests {
     }
 
     #[test]
-    fn centers_the_document_on_wide_terminals() {
+    fn centres_the_measure_only_once_it_stops_growing() {
+        // At an ordinary width there is nothing left over to centre: the text
+        // starts right after the gutter.
         let layout = build(
             &Document::parse("A short paragraph."),
             120,
             Theme::default(),
             &ImageStore::default(),
         );
-        // 120 columns, less the gutter and pad, leaves 114 for a 97 column
-        // measure, so 8 of centring sit outside the gutter.
-        let margin = (120 - GUTTER_WIDTH - RIGHT_PAD - super::measure_for(120)) / 2;
+        assert_eq!(layout.content_margin, GUTTER_WIDTH);
 
-        assert_eq!(margin, 8);
+        // Past the ceiling the surplus becomes margin on both sides.
+        let layout = build(
+            &Document::parse("A short paragraph."),
+            400,
+            Theme::default(),
+            &ImageStore::default(),
+        );
+        let margin = (400 - GUTTER_WIDTH - RIGHT_PAD - MAX_MEASURE) / 2;
         assert_eq!(layout.content_margin, margin + GUTTER_WIDTH);
         assert_eq!(layout.lines[0].spans[0].content, " ".repeat(margin));
     }
@@ -1118,7 +1115,7 @@ mod tests {
     fn reserves_rows_for_loaded_images() {
         let mut images = ImageStore::default();
         let document = Document::parse("![MarkR logo](markr-logo.png)");
-        images.load(Some(Path::new("assets")), &document, COMFORTABLE_MEASURE);
+        images.load(Some(Path::new("assets")), &document, 80);
 
         let layout = build(&document, 100, Theme::default(), &images);
 
