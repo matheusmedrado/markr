@@ -143,10 +143,10 @@ overlays. Pick the palette that matches your terminal: a light theme in a dark t
 dark text on a dark ground, because there is no longer a panel painted underneath it.
 
 There are no panel frames. A single hairline column separates the sidebar from the reader, and the
-measure is responsive: below eighty columns the reader takes everything it is given, and above it the
-measure keeps growing — a wide terminal should not leave two thirds of itself empty — but at half the
-terminal's rate and never past a hundred and ten, so lines stay trackable and the margins widen
-alongside the text. Images are sized against that measure and resized with it. Top-level headings close with a hairline rule the way they do on
+measure fills the terminal: the reader takes every column it is given, less the gutter and the right
+pad, so a wide window is a wide reader rather than a narrow column with empty margins. A ceiling at
+two hundred columns exists only as a guard rail for an ultrawide window; an ordinary maximised
+terminal never reaches it. Images are sized against that measure and resized with it. Top-level headings close with a hairline rule the way they do on
 the web; sub-headings below them are marked by a tick in the four-column gutter at the left of the
 measure, so the text column stays flush and free of prefix glyphs. Fenced code sits on a filled slab with a warm
 bar instead of inside drawn line art, and tables get one rule under the header rather than a grid —
