@@ -191,7 +191,9 @@ impl App {
         images.load(document_dir.as_deref(), &document);
         let initial_started = Instant::now();
         let terminal_width: u16 = 120;
-        let document_width = terminal_width.saturating_sub(33).saturating_sub(5);
+        let document_width = terminal_width
+            .saturating_sub(30)
+            .saturating_sub(layout::RAIL_WIDTH);
         let document_layout = layout::build(&document, document_width, theme, &images);
         Ok(Self {
             workspace,
@@ -288,12 +290,24 @@ impl App {
     }
 
     pub fn document_width(&self) -> u16 {
-        let reader_width = self.reader_outer_width();
-        reader_width.saturating_sub(5)
+        self.reader_outer_width().saturating_sub(layout::RAIL_WIDTH)
     }
 
+    /// The reader owns everything between the header, its spacer row and the
+    /// status bar.
     fn document_height(&self) -> usize {
-        usize::from(self.terminal_height.saturating_sub(4).max(1))
+        usize::from(self.terminal_height.saturating_sub(3).max(1))
+    }
+
+    /// How far through the document the viewport sits, as a percentage.
+    pub fn reading_progress(&self) -> usize {
+        let total = self.document_layout.lines.len();
+        let height = self.document_height();
+        if total <= height {
+            return 100;
+        }
+        let span = total.saturating_sub(height);
+        self.scroll.min(span).saturating_mul(100) / span
     }
 
     fn max_scroll(&self) -> usize {
@@ -349,41 +363,30 @@ impl App {
     }
 
     fn reader_outer_width(&self) -> u16 {
-        let gutter = if self.terminal_width < 72 { 0 } else { 1 };
         match self.responsive_mode {
-            ResponsiveMode::Attached if self.sidebar_visible => self
-                .terminal_width
-                .saturating_sub(self.sidebar_width())
-                .saturating_sub(1)
-                .saturating_sub(gutter * 2),
+            ResponsiveMode::Attached if self.sidebar_visible => {
+                self.terminal_width.saturating_sub(self.sidebar_width())
+            }
             ResponsiveMode::Fullscreen => 0,
-            _ => self.terminal_width.saturating_sub(gutter * 2),
+            _ => self.terminal_width,
         }
     }
 
     pub fn reader_outer_area(&self) -> ratatui::layout::Rect {
+        // Row 0 is the header, row 1 the spacer, the last row the status bar.
         let total = ratatui::layout::Rect::new(
             0,
-            1,
+            2,
             self.terminal_width,
-            self.terminal_height.saturating_sub(2),
+            self.terminal_height.saturating_sub(3),
         );
-        let _gutter = if self.terminal_width < 72 { 0 } else { 1 };
         let x = if self.responsive_mode == ResponsiveMode::Attached && self.sidebar_visible {
-            total
-                .x
-                .saturating_add(self.sidebar_width().saturating_add(1))
+            total.x.saturating_add(self.sidebar_width())
         } else {
             total.x
         };
         let width = total.width.saturating_sub(x.saturating_sub(total.x));
-        let horizontal_gutter = if total.width < 72 { 0 } else { 1 };
-        ratatui::layout::Rect::new(
-            x.saturating_add(horizontal_gutter),
-            total.y,
-            width.saturating_sub(horizontal_gutter.saturating_mul(2)),
-            total.height,
-        )
+        ratatui::layout::Rect::new(x, total.y, width, total.height)
     }
 
     fn set_sidebar_visible(&mut self, visible: bool, at: Instant) {
@@ -895,10 +898,7 @@ impl App {
                 self.clear_selection();
                 self.clear_search();
                 self.focus = Focus::Document;
-                self.set_message(
-                    format!("editing {path_display} · Ctrl-S save · Esc cancel"),
-                    at,
-                );
+                self.set_message(format!("editing {path_display} · ^S save · Esc leave"), at);
             }
             Err(error) => {
                 let message = format!("Cannot edit file: {error}");
@@ -1022,8 +1022,8 @@ impl App {
         }
 
         let document_area = self.reader_outer_area();
-        let inner_x = document_area.x.saturating_add(3);
-        let inner_y = document_area.y.saturating_add(1);
+        let inner = layout::editor_inner(document_area);
+        let (inner_x, inner_y) = (inner.x, inner.y);
         let line = self
             .editor_scroll
             .saturating_add(usize::from(screen_y.saturating_sub(inner_y)));
@@ -1032,7 +1032,7 @@ impl App {
         }
 
         let line_number_width = self.editor_lines().len().max(1).to_string().len();
-        let text_start = inner_x.saturating_add(line_number_width as u16 + 3);
+        let text_start = inner_x.saturating_add(line_number_width as u16 + 5);
         let display_column = self
             .editor_horizontal_scroll
             .saturating_add(usize::from(screen_x.saturating_sub(text_start)));
@@ -1052,10 +1052,9 @@ impl App {
         }
 
         let document_area = self.reader_outer_area();
-        let inner_x = document_area.x.saturating_add(3);
-        let inner_y = document_area.y.saturating_add(1);
-        let inner_width = document_area.width.saturating_sub(5);
-        let inner_height = document_area.height.saturating_sub(2);
+        let inner = layout::reader_inner(document_area);
+        let (inner_x, inner_y) = (inner.x, inner.y);
+        let (inner_width, inner_height) = (inner.width, inner.height);
 
         screen_x >= inner_x
             && screen_x < inner_x.saturating_add(inner_width)
@@ -1076,10 +1075,9 @@ impl App {
             return None;
         }
 
-        let inner_x = document_area.x.saturating_add(3);
-        let inner_y = document_area.y.saturating_add(1);
-        let inner_width = document_area.width.saturating_sub(5);
-        let inner_height = document_area.height.saturating_sub(2);
+        let inner = layout::reader_inner(document_area);
+        let (inner_x, inner_y) = (inner.x, inner.y);
+        let (inner_width, inner_height) = (inner.width, inner.height);
 
         if screen_x < inner_x
             || screen_x >= inner_x.saturating_add(inner_width)
@@ -1843,10 +1841,10 @@ mod tests {
         app.update(key(KeyCode::Char('e')));
 
         let reader = app.reader_outer_area();
-        let inner_x = reader.x.saturating_add(3);
-        let inner_y = reader.y.saturating_add(1);
+        let inner = crate::layout::editor_inner(reader);
+        let (inner_x, inner_y) = (inner.x, inner.y);
         let line_number_width = app.editor_lines().len().to_string().len();
-        let text_start = inner_x.saturating_add(line_number_width as u16 + 3);
+        let text_start = inner_x.saturating_add(line_number_width as u16 + 5);
         app.update(mouse(
             MouseEventKind::Down(MouseButton::Left),
             text_start + 2,
