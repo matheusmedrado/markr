@@ -177,6 +177,11 @@ struct UiSnapshot {
     quit: bool,
 }
 
+/// Lines covered by one notch of a discrete mouse wheel. A trackpad sends a
+/// stream of events and feels fine at one line each; a wheel sends one event
+/// per notch, which made a real mouse crawl next to it.
+const MOUSE_WHEEL_LINES: usize = 3;
+
 impl App {
     pub fn new(
         workspace: Workspace,
@@ -968,17 +973,21 @@ impl App {
 
         match event.kind {
             MouseEventKind::ScrollUp if self.mouse_is_over_reader(event.column, event.row) => {
-                if self.is_editing() {
-                    self.editor_scroll_up();
-                } else {
-                    self.move_up(at);
+                for _ in 0..MOUSE_WHEEL_LINES {
+                    if self.is_editing() {
+                        self.editor_scroll_up();
+                    } else {
+                        self.move_up(at);
+                    }
                 }
             }
             MouseEventKind::ScrollDown if self.mouse_is_over_reader(event.column, event.row) => {
-                if self.is_editing() {
-                    self.editor_scroll_down();
-                } else {
-                    self.move_down(at);
+                for _ in 0..MOUSE_WHEEL_LINES {
+                    if self.is_editing() {
+                        self.editor_scroll_down();
+                    } else {
+                        self.move_down(at);
+                    }
                 }
             }
             MouseEventKind::Down(MouseButton::Left) if self.is_editing() => {
@@ -1985,7 +1994,7 @@ mod tests {
         });
 
         app.update(mouse(MouseEventKind::ScrollDown, 35, 3));
-        assert_eq!(app.scroll, 1);
+        assert_eq!(app.scroll, super::MOUSE_WHEEL_LINES);
 
         app.update(mouse(MouseEventKind::ScrollUp, 35, 3));
         assert_eq!(app.scroll, 0);
@@ -2007,7 +2016,7 @@ mod tests {
         assert!(app.editor_lines().len() > app.document_height());
 
         app.update(mouse(MouseEventKind::ScrollDown, 35, 3));
-        assert_eq!(app.editor_scroll, 1);
+        assert_eq!(app.editor_scroll, super::MOUSE_WHEEL_LINES);
         assert_eq!(app.scroll, 0);
 
         app.update(mouse(MouseEventKind::ScrollUp, 35, 3));

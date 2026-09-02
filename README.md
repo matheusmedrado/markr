@@ -136,9 +136,11 @@ plane, and depth comes from typography and spacing rather than from stacked pane
 - structure carried by type and one hairline, not by boxes;
 - familiar interactions before clever ones.
 
-There are no panel frames. A single hairline column separates the sidebar from the reader, and
-heading level lives in a four-column gutter at the left of the measure — a tick in the margin — so
-the text column stays flush and free of prefix glyphs. Fenced code sits on a filled slab with a warm
+There are no panel frames. A single hairline column separates the sidebar from the reader, and the
+measure is capped at eighty columns so prose stays near a comfortable reading length and gains real
+side margins on a wider terminal. Top-level headings close with a hairline rule the way they do on
+the web; sub-headings below them are marked by a tick in the four-column gutter at the left of the
+measure, so the text column stays flush and free of prefix glyphs. Fenced code sits on a filled slab with a warm
 bar instead of inside drawn line art, and tables get one rule under the header rather than a grid —
 their cells wrap rather than being cut short, and records gain a blank line between them as soon as
 any of them needs two lines. Wrapped source lines reflow into the measure, so paragraphs fill the
