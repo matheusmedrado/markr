@@ -111,6 +111,8 @@ pub struct App {
     pub workspace: Workspace,
     pub document: Document,
     pub document_layout: layout::DocumentLayout,
+    /// The measure the currently decoded images were sized against.
+    image_measure: usize,
     pub theme: Theme,
     pub images: ImageStore,
     pub file_explorer: FileExplorer,
@@ -192,18 +194,20 @@ impl App {
         let document = Document::parse(&workspace.reload_content()?);
         let last_modified = modified_time(workspace.active_path());
         let document_dir = document_dir(&workspace);
-        let mut images = ImageStore::new(picker);
-        images.load(document_dir.as_deref(), &document);
         let initial_started = Instant::now();
         let terminal_width: u16 = 120;
         let document_width = terminal_width
             .saturating_sub(30)
             .saturating_sub(layout::RAIL_WIDTH);
+        let mut images = ImageStore::new(picker);
+        let image_measure = layout::measure_for(document_width);
+        images.load(document_dir.as_deref(), &document, image_measure);
         let document_layout = layout::build(&document, document_width, theme, &images);
         Ok(Self {
             workspace,
             document,
             document_layout,
+            image_measure,
             theme,
             images,
             file_explorer,
@@ -322,7 +326,20 @@ impl App {
             .saturating_sub(self.document_height())
     }
 
+    /// Re-decodes the document's images at the reader's current measure.
+    fn reload_images(&mut self) {
+        let dir = document_dir(&self.workspace);
+        self.image_measure = layout::measure_for(self.document_width());
+        self.images
+            .load(dir.as_deref(), &self.document, self.image_measure);
+    }
+
     fn rebuild_layout(&mut self) {
+        // Images are sized in cells at decode time, so a terminal resize that
+        // moves the measure has to resize them too.
+        if layout::measure_for(self.document_width()) != self.image_measure {
+            self.reload_images();
+        }
         self.document_layout = layout::build(
             &self.document,
             self.document_width(),
@@ -1534,8 +1551,7 @@ impl App {
             .min(self.document.outline.len().saturating_sub(1));
         self.last_modified = modified_time(self.workspace.active_path());
         self.error = None;
-        let dir = document_dir(&self.workspace);
-        self.images.load(dir.as_deref(), &self.document);
+        self.reload_images();
         self.rebuild_layout();
         self.clear_selection();
         self.clear_search();
