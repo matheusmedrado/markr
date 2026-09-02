@@ -80,10 +80,9 @@ fn fill_area(frame: &mut Frame, area: Rect, background: Color) {
 }
 
 pub fn render(frame: &mut Frame, app: &App) {
-    frame.render_widget(
-        TuiBlock::default().style(Style::default().bg(app.theme.background)),
-        frame.area(),
-    );
+    // Nothing paints a background: the terminal's own ground shows through, so
+    // transparent and blurred terminals keep working. Fills are reserved for
+    // things that genuinely need to occlude — slabs, chips and overlays.
 
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -256,8 +255,8 @@ fn render_reader(frame: &mut Frame, app: &App, document_area: Rect) {
             }
         })
         .collect::<Vec<_>>();
-    let paragraph = Paragraph::new(Text::from(visible_lines))
-        .style(Style::default().fg(theme.text).bg(theme.reader_background));
+    let paragraph =
+        Paragraph::new(Text::from(visible_lines)).style(Style::default().fg(theme.text));
     frame.render_widget(paragraph, inner);
 
     let content_margin = app.document_layout.content_margin;
@@ -372,7 +371,6 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
                         line,
                         horizontal_scroll,
                         horizontal_scroll.saturating_add(visible_width),
-                        theme.reader_background,
                     )
                 })
                 .unwrap_or_else(|| {
@@ -392,8 +390,7 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
         .collect::<Vec<_>>();
 
     frame.render_widget(
-        Paragraph::new(Text::from(text))
-            .style(Style::default().fg(theme.text).bg(theme.reader_background)),
+        Paragraph::new(Text::from(text)).style(Style::default().fg(theme.text)),
         inner,
     );
 
@@ -422,18 +419,13 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
     frame.set_cursor_position(Position::new(x, y));
 }
 
-fn slice_spans_by_columns(
-    spans: &[Span<'static>],
-    start: usize,
-    end: usize,
-    background: Color,
-) -> Vec<Span<'static>> {
+fn slice_spans_by_columns(spans: &[Span<'static>], start: usize, end: usize) -> Vec<Span<'static>> {
     let mut result = Vec::new();
     let mut column: usize = 0;
 
     for span in spans {
         let mut segment = String::new();
-        let style = span.style.bg(background);
+        let style = span.style;
         for grapheme in span.content.graphemes(true) {
             let grapheme_start = column;
             let grapheme_end = column.saturating_add(grapheme.width());
@@ -1093,7 +1085,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use ratatui::style::{Modifier, Style};
+    use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui_image::picker::{Picker, ProtocolType};
 
@@ -1237,11 +1229,15 @@ mod tests {
         // Row 1 is the breathing row between the header and the body.
         assert_eq!(buffer[(0, 1)].symbol(), " ");
 
-        // Sidebar and reader share the shell's ground; depth comes from type.
-        assert_eq!(theme.reader_background, theme.background);
-        assert_eq!(buffer[(0, 0)].bg, theme.background);
-        assert_eq!(buffer[(118, 10)].bg, theme.background);
-        assert_eq!(buffer[(5, 10)].bg, theme.background);
+        // Nothing paints a ground of its own, so a transparent or blurred
+        // terminal shows through the header, the sidebar and the reader alike.
+        for cell in [(0, 0), (118, 10), (5, 10), (60, 30)] {
+            assert_eq!(
+                buffer[cell].bg,
+                Color::Reset,
+                "the shell painted over the terminal at {cell:?}"
+            );
+        }
 
         // A single hairline column stands in for the sidebar's frame.
         assert_eq!(buffer[(29, 5)].symbol(), "│");
