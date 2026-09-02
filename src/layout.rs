@@ -29,10 +29,36 @@ impl DocumentLayout {
     }
 }
 
-/// The measure, in columns. Eighty is the terminal's own convention and keeps
-/// prose near the comfortable reading length; capping here also buys real side
-/// margins once the terminal is wider than the column.
-pub const MAX_CONTENT_WIDTH: usize = 80;
+/// The width prose settles at once the terminal has room for it. Eighty is the
+/// terminal's own convention and sits mid-way through the comfortable reading
+/// range.
+pub const COMFORTABLE_MEASURE: usize = 80;
+
+/// The ceiling. Past this a line is long enough that the eye starts losing the
+/// return sweep, and the terminal's extra width is better spent on margin.
+pub const MAX_MEASURE: usize = 110;
+
+/// Columns left for the measure and its centring once the gutter and the right
+/// pad are taken out.
+fn available_width(width: u16) -> usize {
+    usize::from(width.max(1))
+        .saturating_sub(GUTTER_WIDTH.saturating_add(RIGHT_PAD))
+        .max(1)
+}
+
+/// The reading measure for a reader `width` columns wide.
+///
+/// Below the comfortable width the reader takes everything it is given. Above
+/// it the measure keeps growing — a wide terminal should not leave two thirds
+/// of itself empty — but at half the terminal's rate, so lines stay trackable
+/// and the margins widen alongside the text.
+pub fn measure_for(width: u16) -> usize {
+    let available = available_width(width);
+    if available <= COMFORTABLE_MEASURE {
+        return available;
+    }
+    (COMFORTABLE_MEASURE + (available - COMFORTABLE_MEASURE) / 2).min(MAX_MEASURE)
+}
 
 /// Columns reserved at the left of every reader line: two of padding, the
 /// heading-level tick, then one space before the text begins.
@@ -63,11 +89,8 @@ pub fn editor_inner(area: Rect) -> Rect {
 }
 
 pub fn build(document: &Document, width: u16, theme: Theme, images: &ImageStore) -> DocumentLayout {
-    let total_width = usize::from(width.max(1));
-    let available = total_width
-        .saturating_sub(GUTTER_WIDTH.saturating_add(RIGHT_PAD))
-        .max(1);
-    let max_width = available.min(MAX_CONTENT_WIDTH);
+    let available = available_width(width);
+    let max_width = measure_for(width);
     let mut lines = Vec::new();
     let mut heading_lines = Vec::new();
     let mut heading_levels = Vec::new();
@@ -740,15 +763,31 @@ mod tests {
     use ratatui::style::Modifier;
     use ratatui::text::Line;
 
-    use super::{DocumentLayout, GUTTER_WIDTH, RIGHT_PAD, build, text_width};
+    use super::{
+        COMFORTABLE_MEASURE, DocumentLayout, GUTTER_WIDTH, MAX_MEASURE, RIGHT_PAD, build,
+        measure_for, text_width,
+    };
     use crate::images::{Asset, ImageStore};
     use crate::markdown::Document;
     use crate::theme::Theme;
 
     /// The reader width that yields `measure` columns of text once the gutter
-    /// and the right pad are taken out.
+    /// and the right pad are taken out. Only used below the comfortable width,
+    /// where the measure takes everything available.
     fn reader_width(measure: u16) -> u16 {
         measure + (GUTTER_WIDTH + RIGHT_PAD) as u16
+    }
+
+    #[test]
+    fn the_measure_grows_with_the_terminal_but_more_slowly_than_it() {
+        // Narrow: take every column there is.
+        assert_eq!(measure_for(60), 54);
+        // At the comfortable width, exactly the terminal.
+        assert_eq!(measure_for(86), 80);
+        // Wider: keep growing, at half the terminal's rate.
+        assert_eq!(measure_for(120), 97);
+        // Very wide: stop before lines get tiring and let margin take the rest.
+        assert_eq!(measure_for(260), MAX_MEASURE);
     }
 
     /// One laid out line with its gutter stripped, as the measure reads it.
@@ -1066,11 +1105,11 @@ mod tests {
             Theme::default(),
             &ImageStore::default(),
         );
-        // 120 columns, less the gutter and pad, leaves 114 for an 80 column
-        // measure, so 17 of centring sit outside the gutter.
-        let margin = (120 - GUTTER_WIDTH - RIGHT_PAD - super::MAX_CONTENT_WIDTH) / 2;
+        // 120 columns, less the gutter and pad, leaves 114 for a 97 column
+        // measure, so 8 of centring sit outside the gutter.
+        let margin = (120 - GUTTER_WIDTH - RIGHT_PAD - super::measure_for(120)) / 2;
 
-        assert_eq!(margin, 17);
+        assert_eq!(margin, 8);
         assert_eq!(layout.content_margin, margin + GUTTER_WIDTH);
         assert_eq!(layout.lines[0].spans[0].content, " ".repeat(margin));
     }
@@ -1079,7 +1118,7 @@ mod tests {
     fn reserves_rows_for_loaded_images() {
         let mut images = ImageStore::default();
         let document = Document::parse("![MarkR logo](markr-logo.png)");
-        images.load(Some(Path::new("assets")), &document);
+        images.load(Some(Path::new("assets")), &document, COMFORTABLE_MEASURE);
 
         let layout = build(&document, 100, Theme::default(), &images);
 
