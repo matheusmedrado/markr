@@ -462,8 +462,10 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     }
     let theme = app.theme;
     // Attached, the sidebar shares the reader's single plane. Overlaid it has to
-    // occlude, so it takes a fill of its own.
+    // occlude: clearing first drops the reader's glyphs, which a background fill
+    // on its own would leave showing through.
     if app.responsive_mode() != ResponsiveMode::Attached {
+        frame.render_widget(Clear, area);
         fill_area(frame, area, theme.surface);
     }
 
@@ -1324,6 +1326,42 @@ mod tests {
         assert_eq!(buffer[(1, 3)].fg, theme.accent);
         assert_eq!(buffer[(29, 5)].fg, theme.accent_soft);
         assert_eq!(buffer[(119, 2)].fg, theme.accent_soft);
+    }
+
+    #[test]
+    fn the_overlaid_sidebar_occludes_the_reader_instead_of_letting_it_through() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
+        // Between 72 and 99 columns the sidebar is drawn over the reader.
+        app.update(Message::Resize {
+            width: 84,
+            height: 40,
+            at: Instant::now(),
+        });
+        assert_eq!(app.responsive_mode(), crate::app::ResponsiveMode::Overlay);
+
+        // Let the sidebar finish sliding in: while it animates it is narrower
+        // than its full width and the reader is meant to show beside it.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        let mut terminal = Terminal::new(TestBackend::new(84, 40)).expect("terminal");
+        terminal
+            .draw(|frame| super::render(frame, &app))
+            .expect("render overlay");
+
+        // Well below the outline's last entry, so anything here would be the
+        // reader's own text showing through a background-only fill.
+        let buffer = terminal.backend().buffer();
+        let beneath =
+            (0..app.sidebar_width().saturating_sub(1)).fold(String::new(), |mut text, x| {
+                text.push_str(buffer[(x, 34)].symbol());
+                text
+            });
+        assert!(
+            beneath.trim().is_empty(),
+            "the reader shows through the overlaid sidebar: {beneath:?}"
+        );
     }
 
     #[test]
