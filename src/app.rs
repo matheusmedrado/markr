@@ -140,7 +140,6 @@ pub struct App {
     responsive_mode: ResponsiveMode,
     sidebar_transition: Transition,
     tab_transition: Transition,
-    selection_transition: Transition,
     help_transition: Transition,
     initial_started: Instant,
     temporary_message: Option<(String, Instant)>,
@@ -240,12 +239,6 @@ impl App {
                 Duration::from_millis(200),
             ),
             tab_transition: Transition::new(0.0, 1.0, initial_started, Duration::from_millis(120)),
-            selection_transition: Transition::new(
-                0.0,
-                1.0,
-                initial_started,
-                Duration::from_millis(90),
-            ),
             help_transition: Transition::new(0.0, 0.0, initial_started, Duration::ZERO),
             initial_started,
             temporary_message: None,
@@ -372,7 +365,6 @@ impl App {
         at.saturating_duration_since(self.initial_started) < Duration::from_millis(220)
             || self.sidebar_transition.active(at)
             || self.tab_transition.active(at)
-            || self.selection_transition.active(at)
             || self.help_transition.active(at)
             || self.message_animation_active(at)
     }
@@ -484,10 +476,10 @@ impl App {
                 self.clamp_scroll();
                 before != self.ui_snapshot()
             }
-            Message::Mouse { event, at } => {
-                self.handle_mouse(event, at);
-                true
-            }
+            // Mouse capture delivers motion events too. Redrawing on every
+            // one of them kept the reader repainting whenever the pointer
+            // crossed it, for nothing.
+            Message::Mouse { event, .. } => self.handle_mouse(event),
             Message::Tick => self.reload_if_changed(),
             Message::Resize { width, height, at } => {
                 if self.terminal_width == width && self.terminal_height == height {
@@ -643,14 +635,14 @@ impl App {
                 if self.select_mode && self.focus == Focus::Document {
                     self.selection_move_up();
                 } else {
-                    self.move_up(at);
+                    self.move_up();
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.select_mode && self.focus == Focus::Document {
                     self.selection_move_down();
                 } else {
-                    self.move_down(at);
+                    self.move_down();
                 }
             }
             KeyCode::Left | KeyCode::Char('h') => {
@@ -978,23 +970,27 @@ impl App {
         }
     }
 
-    fn handle_mouse(&mut self, event: crossterm::event::MouseEvent, at: Instant) {
+    /// Returns whether the event changed anything worth redrawing.
+    fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {
         use crossterm::event::{MouseButton, MouseEventKind};
 
         if self.focus != Focus::Document
             || self.unsaved_action.is_some()
             || self.external_prompt.is_some()
         {
-            return;
+            return false;
         }
 
+        // A scroll that is already against a stop changes nothing, so the
+        // viewport is compared before and after rather than assumed to move.
+        let before = (self.scroll, self.editor_scroll);
         match event.kind {
             MouseEventKind::ScrollUp if self.mouse_is_over_reader(event.column, event.row) => {
                 for _ in 0..MOUSE_WHEEL_LINES {
                     if self.is_editing() {
                         self.editor_scroll_up();
                     } else {
-                        self.move_up(at);
+                        self.move_up();
                     }
                 }
             }
@@ -1003,24 +999,30 @@ impl App {
                     if self.is_editing() {
                         self.editor_scroll_down();
                     } else {
-                        self.move_down(at);
+                        self.move_down();
                     }
                 }
             }
             MouseEventKind::Down(MouseButton::Left) if self.is_editing() => {
                 if let Some(position) = self.editor_position_at(event.column, event.row) {
                     self.set_editor_cursor(position);
+                    return true;
                 }
+                return false;
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(position) = self.document_position_at(event.column, event.row) {
                     self.start_selection(position);
+                    return true;
                 }
+                return false;
             }
             MouseEventKind::Drag(MouseButton::Left) if !self.is_editing() => {
                 if let Some(position) = self.document_position_at(event.column, event.row) {
                     self.update_selection(position);
+                    return true;
                 }
+                return false;
             }
             MouseEventKind::Up(MouseButton::Left)
                 if !self.is_editing()
@@ -1030,9 +1032,11 @@ impl App {
                         .is_some_and(|selection| selection.is_empty()) =>
             {
                 self.clear_selection();
+                return true;
             }
-            _ => {}
+            _ => return false,
         }
+        before != (self.scroll, self.editor_scroll)
     }
 
     fn set_editor_cursor(&mut self, position: CursorPosition) {
@@ -1346,7 +1350,7 @@ impl App {
         (!self.search_matches.is_empty()).then_some(self.search_selected)
     }
 
-    fn move_up(&mut self, at: Instant) {
+    fn move_up(&mut self) {
         match self.focus {
             Focus::Sidebar => match self.sidebar_panel {
                 SidebarPanel::Outline => {
@@ -1356,10 +1360,9 @@ impl App {
             },
             Focus::Document => self.scroll = self.scroll.saturating_sub(1),
         }
-        self.selection_transition = Transition::new(0.0, 1.0, at, Duration::from_millis(90));
     }
 
-    fn move_down(&mut self, at: Instant) {
+    fn move_down(&mut self) {
         match self.focus {
             Focus::Sidebar => match self.sidebar_panel {
                 SidebarPanel::Outline => {
@@ -1372,9 +1375,11 @@ impl App {
                     self.file_explorer.move_down();
                 }
             },
-            Focus::Document => self.scroll = self.scroll.saturating_add(1),
+            // Clamped here rather than at the call sites: an unclamped counter
+            // runs away past the end of the document and then needs as many
+            // presses to come back.
+            Focus::Document => self.scroll = self.scroll.saturating_add(1).min(self.max_scroll()),
         }
-        self.selection_transition = Transition::new(0.0, 1.0, at, Duration::from_millis(90));
     }
 
     fn editor_scroll_up(&mut self) {
@@ -2018,6 +2023,55 @@ mod tests {
         app.update(key(KeyCode::Tab));
         app.update(mouse(MouseEventKind::ScrollDown, 5, 3));
         assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn scrolling_the_reader_starts_no_animation() {
+        let mut app = readme_app();
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+
+        // Past the start-up animation window, so only a transition started by
+        // the scroll itself could keep the clock running.
+        let at = Instant::now() + std::time::Duration::from_millis(300);
+        assert!(!app.animation_active(at));
+
+        app.update(Message::Mouse {
+            event: MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 60,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            },
+            at,
+        });
+        assert_eq!(app.scroll, super::MOUSE_WHEEL_LINES);
+
+        // Scrolling used to restart a transition that drove nothing visible,
+        // which pinned the event loop to a sixteen millisecond poll — a full
+        // screen repaint every frame for ninety milliseconds after every notch.
+        assert!(!app.animation_active(at + std::time::Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn only_redraws_for_mouse_events_that_change_something() {
+        let mut app = readme_app();
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+
+        // Mouse capture delivers motion events; they change nothing.
+        assert!(!app.update(mouse(MouseEventKind::Moved, 60, 5)));
+        // A scroll that moves the viewport does.
+        assert!(app.update(mouse(MouseEventKind::ScrollDown, 60, 5)));
+        // A scroll already against the top does not.
+        app.scroll = 0;
+        assert!(!app.update(mouse(MouseEventKind::ScrollUp, 60, 5)));
     }
 
     #[test]

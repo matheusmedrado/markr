@@ -211,6 +211,11 @@ cargo test
 cargo clippy -- -D warnings
 ```
 
+Debug builds compile this crate lightly optimised and its dependencies fully optimised, so
+`cargo run` renders at the same speed as a release build. Syntax highlighting and image decoding are
+what dominate a frame, and both live in dependencies; leaving them unoptimised made the reader stutter
+while scrolling for no reason other than the default profile.
+
 The project keeps its private planning notes in `local/`. That directory is intentionally ignored by Git and is not part of the public project.
 
 ## License

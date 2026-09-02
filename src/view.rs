@@ -240,6 +240,12 @@ fn render_reader(frame: &mut Frame, app: &App, document_area: Rect) {
                     )
                 })
                 .collect::<Vec<_>>();
+            // Scrolling redraws every visible line. With nothing to highlight —
+            // the common case — the spans are borrowed straight out of the
+            // layout rather than cloning every string in the viewport.
+            if highlights.is_empty() && selection_range.is_none() {
+                return borrowed_line(line);
+            }
             let highlighted = highlight_search_line(line, &highlights, theme);
             if let Some((sel_start, sel_end)) = selection_range {
                 highlight_selection_line(
@@ -261,28 +267,24 @@ fn render_reader(frame: &mut Frame, app: &App, document_area: Rect) {
 
     let content_margin = app.document_layout.content_margin;
     let content_width = layout::measure_for(inner.width);
-    let image_regions: Vec<(String, usize)> = app
-        .document_layout
-        .image_regions
-        .iter()
-        .map(|region| (region.src.clone(), region.line))
-        .collect();
-    for (src, line) in image_regions {
-        let Some(Asset::Ready { cols, rows, .. }) = app.images.asset(&src) else {
+    for region in &app.document_layout.image_regions {
+        let Some(Asset::Ready {
+            protocol,
+            cols,
+            rows,
+        }) = app.images.asset(&region.src)
+        else {
             continue;
         };
         if let Some(position) = image_position(
             inner,
             content_margin,
             content_width,
-            line,
+            region.line,
             app.scroll,
             *cols,
             *rows,
         ) {
-            let Some(Asset::Ready { protocol, .. }) = app.images.asset(&src) else {
-                continue;
-            };
             frame.render_widget(SlicedImage::new(protocol, position), inner);
         }
     }
@@ -327,6 +329,16 @@ fn render_reading_rail(frame: &mut Frame, app: &App, document_area: Rect) {
         cell.set_symbol("▐");
         cell.set_fg(color);
     }
+}
+
+/// A view of a laid out line that borrows its text instead of copying it.
+fn borrowed_line<'a>(line: &'a Line<'static>) -> Line<'a> {
+    Line::from(
+        line.spans
+            .iter()
+            .map(|span| Span::styled(span.content.as_ref(), span.style))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
