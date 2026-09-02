@@ -126,20 +126,30 @@ The controls are intentionally small. MarkR may borrow a few ideas from modal ed
 
 ## Design direction
 
-MarkR aims for a terminal workspace with the atmosphere of a carefully configured editor. The
-application uses a fully themed shell with distinct surfaces for the background, sidebar and reader.
-Rounded borders and restrained contrast keep the panels connected without making the terminal feel
-like a wall of boxes:
+MarkR aims for a terminal workspace with the atmosphere of a carefully edited page. The chrome
+recedes until the document is the interface: the shell, the sidebar and the reader share a single
+plane, and depth comes from typography and spacing rather than from stacked panels:
 
 - calm dark and light palettes with restrained accent colors;
 - generous spacing and clear document hierarchy;
 - an outline that makes large documents feel smaller;
-- subtle borders and symbols instead of visual noise;
+- structure carried by type and one hairline, not by boxes;
 - familiar interactions before clever ones.
 
-The reader is a rounded solid panel with one cell of breathing room on every side on medium and wide
-terminals. A short orange editorial marker indicates document focus, while the sidebar uses a quieter
-surface and border to keep navigation visually separate from the document.
+There are no panel frames. A single hairline column separates the sidebar from the reader, and the
+measure is capped at eighty columns so prose stays near a comfortable reading length and gains real
+side margins on a wider terminal. Top-level headings close with a hairline rule the way they do on
+the web; sub-headings below them are marked by a tick in the four-column gutter at the left of the
+measure, so the text column stays flush and free of prefix glyphs. Fenced code sits on a filled slab with a warm
+bar instead of inside drawn line art, and tables get one rule under the header rather than a grid —
+their cells wrap rather than being cut short, and records gain a blank line between them as soon as
+any of them needs two lines. Wrapped source lines reflow into the measure, so paragraphs fill the
+column instead of inheriting whatever width the file happened to be written at.
+A one-column reading rail at the right edge shows how far through the document you are and doubles as
+the reader's focus indicator; the sidebar's hairline does the same for the outline. Overlays — the
+quick guide and the save prompts — are frameless panels, and the document behind them redraws at
+reduced luminance so it keeps its shape while it is out of focus.
+
 Below 100 columns the sidebar becomes an overlay; below 72 columns it becomes a temporary full-screen
 panel. Choose `markr` or `midnight` for dark terminal backgrounds and `paper` for light ones.
 

@@ -69,6 +69,8 @@ pub struct Theme {
     pub chrome_muted: Color,
     pub selection: Color,
     pub accent_soft: Color,
+    /// Warm mid-tone reserved for list bullets: quieter than `accent`, louder than `text_muted`.
+    pub marker: Color,
     pub error: Color,
     pub warning: Color,
     pub success: Color,
@@ -85,66 +87,69 @@ impl Theme {
         match name {
             ThemeName::Markr => Self {
                 name,
-                background: Color::Rgb(10, 10, 11),
-                surface: Color::Rgb(17, 17, 19),
-                surface_active: Color::Rgb(30, 30, 33),
-                text: Color::Rgb(232, 232, 232),
-                text_muted: Color::Rgb(137, 137, 143),
+                background: Color::Rgb(11, 10, 9),
+                surface: Color::Rgb(21, 19, 15),
+                surface_active: Color::Rgb(30, 26, 21),
+                text: Color::Rgb(233, 227, 217),
+                text_muted: Color::Rgb(139, 129, 117),
                 accent: Color::Rgb(242, 125, 38),
-                link: Color::Rgb(107, 174, 255),
-                border: Color::Rgb(53, 53, 59),
-                code: Color::Rgb(219, 180, 108),
-                reader_background: Color::Rgb(17, 17, 19),
-                reader_border: Color::Rgb(74, 74, 80),
-                chrome_text: Color::Rgb(232, 232, 232),
-                chrome_muted: Color::Rgb(137, 137, 143),
-                selection: Color::Rgb(44, 35, 28),
-                accent_soft: Color::Rgb(92, 57, 31),
-                error: Color::Rgb(255, 112, 91),
-                warning: Color::Rgb(244, 184, 76),
-                success: Color::Rgb(111, 208, 137),
+                link: Color::Rgb(127, 180, 201),
+                border: Color::Rgb(74, 68, 61),
+                code: Color::Rgb(217, 178, 106),
+                reader_background: Color::Rgb(11, 10, 9),
+                reader_border: Color::Rgb(43, 38, 34),
+                chrome_text: Color::Rgb(233, 227, 217),
+                chrome_muted: Color::Rgb(139, 129, 117),
+                selection: Color::Rgb(43, 38, 34),
+                accent_soft: Color::Rgb(138, 84, 36),
+                marker: Color::Rgb(199, 124, 56),
+                error: Color::Rgb(224, 96, 63),
+                warning: Color::Rgb(217, 164, 65),
+                success: Color::Rgb(127, 174, 127),
             },
             ThemeName::Midnight => Self {
                 name,
-                background: Color::Rgb(7, 12, 20),
-                surface: Color::Rgb(12, 20, 32),
+                background: Color::Rgb(8, 13, 21),
+                surface: Color::Rgb(16, 26, 40),
                 surface_active: Color::Rgb(22, 35, 52),
-                text: Color::Rgb(226, 232, 240),
+                text: Color::Rgb(221, 229, 239),
                 text_muted: Color::Rgb(125, 141, 163),
                 accent: Color::Rgb(242, 125, 38),
                 link: Color::Rgb(114, 180, 255),
-                border: Color::Rgb(40, 58, 78),
+                border: Color::Rgb(68, 86, 109),
                 code: Color::Rgb(222, 180, 110),
-                reader_background: Color::Rgb(12, 20, 32),
-                reader_border: Color::Rgb(61, 79, 101),
-                chrome_text: Color::Rgb(226, 232, 240),
+                reader_background: Color::Rgb(8, 13, 21),
+                reader_border: Color::Rgb(34, 48, 63),
+                chrome_text: Color::Rgb(221, 229, 239),
                 chrome_muted: Color::Rgb(125, 141, 163),
-                selection: Color::Rgb(51, 43, 33),
-                accent_soft: Color::Rgb(92, 57, 31),
-                error: Color::Rgb(255, 126, 105),
-                warning: Color::Rgb(244, 184, 76),
-                success: Color::Rgb(111, 208, 137),
+                selection: Color::Rgb(34, 48, 63),
+                accent_soft: Color::Rgb(122, 74, 31),
+                marker: Color::Rgb(199, 124, 56),
+                error: Color::Rgb(224, 96, 63),
+                warning: Color::Rgb(217, 164, 65),
+                success: Color::Rgb(127, 174, 127),
             },
             ThemeName::Paper => Self {
                 name,
-                background: Color::Rgb(244, 241, 234),
-                surface: Color::Rgb(234, 229, 219),
-                surface_active: Color::Rgb(221, 214, 201),
-                text: Color::Rgb(38, 36, 33),
-                text_muted: Color::Rgb(105, 99, 90),
-                accent: Color::Rgb(211, 93, 42),
-                link: Color::Rgb(40, 93, 153),
-                border: Color::Rgb(187, 178, 163),
-                code: Color::Rgb(142, 91, 35),
-                reader_background: Color::Rgb(255, 252, 246),
-                reader_border: Color::Rgb(187, 178, 163),
-                chrome_text: Color::Rgb(38, 36, 33),
-                chrome_muted: Color::Rgb(105, 99, 90),
-                selection: Color::Rgb(247, 224, 193),
-                accent_soft: Color::Rgb(247, 224, 193),
+                background: Color::Rgb(248, 245, 238),
+                surface: Color::Rgb(235, 227, 210),
+                surface_active: Color::Rgb(224, 215, 196),
+                text: Color::Rgb(35, 32, 28),
+                text_muted: Color::Rgb(107, 100, 89),
+                accent: Color::Rgb(200, 92, 24),
+                link: Color::Rgb(47, 111, 143),
+                border: Color::Rgb(140, 132, 117),
+                code: Color::Rgb(138, 90, 30),
+                reader_background: Color::Rgb(248, 245, 238),
+                reader_border: Color::Rgb(207, 198, 180),
+                chrome_text: Color::Rgb(35, 32, 28),
+                chrome_muted: Color::Rgb(107, 100, 89),
+                selection: Color::Rgb(224, 215, 196),
+                accent_soft: Color::Rgb(217, 154, 94),
+                marker: Color::Rgb(166, 96, 28),
                 error: Color::Rgb(169, 45, 38),
-                warning: Color::Rgb(151, 101, 24),
-                success: Color::Rgb(41, 121, 73),
+                warning: Color::Rgb(154, 106, 18),
+                success: Color::Rgb(63, 122, 79),
             },
         }
     }
@@ -158,12 +163,6 @@ impl Theme {
             ThemeName::Markr | ThemeName::Midnight => "base16-ocean.dark",
             ThemeName::Paper => "InspiredGitHub",
         }
-    }
-
-    pub fn title(self) -> Style {
-        Style::default()
-            .fg(self.chrome_text)
-            .add_modifier(Modifier::BOLD)
     }
 
     pub fn muted(self) -> Style {
@@ -203,7 +202,18 @@ mod tests {
         assert_eq!(Theme::default().name, ThemeName::Markr);
         assert_eq!(
             Theme::new(ThemeName::Paper).background,
-            Color::Rgb(244, 241, 234)
+            Color::Rgb(248, 245, 238)
         );
+    }
+
+    #[test]
+    fn reads_on_a_single_plane_in_every_palette() {
+        for name in ThemeName::ALL {
+            let theme = Theme::new(name);
+            assert_eq!(
+                theme.reader_background, theme.background,
+                "{name} splits the reader onto a second plane"
+            );
+        }
     }
 }

@@ -1,3 +1,4 @@
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
@@ -28,13 +29,48 @@ impl DocumentLayout {
     }
 }
 
-pub const MAX_CONTENT_WIDTH: usize = 88;
+/// The measure, in columns. Eighty is the terminal's own convention and keeps
+/// prose near the comfortable reading length; capping here also buys real side
+/// margins once the terminal is wider than the column.
+pub const MAX_CONTENT_WIDTH: usize = 80;
+
+/// Columns reserved at the left of every reader line: two of padding, the
+/// heading-level tick, then one space before the text begins.
+pub const GUTTER_WIDTH: usize = 4;
+
+/// Columns kept clear at the right of the measure.
+pub const RIGHT_PAD: usize = 2;
+
+/// The reading-progress rail owns the reader's last column.
+pub const RAIL_WIDTH: u16 = 1;
+
+/// The reader's text area. The reader has no frame, so this is the whole area
+/// minus the progress rail; the left gutter and right pad live inside the laid
+/// out lines and are accounted for by [`DocumentLayout::content_margin`].
+pub fn reader_inner(area: Rect) -> Rect {
+    Rect::new(
+        area.x,
+        area.y,
+        area.width.saturating_sub(RAIL_WIDTH),
+        area.height,
+    )
+}
+
+/// The editor's text area. Its line-number gutter stands in for the rail, so it
+/// uses the full area.
+pub fn editor_inner(area: Rect) -> Rect {
+    area
+}
 
 pub fn build(document: &Document, width: u16, theme: Theme, images: &ImageStore) -> DocumentLayout {
     let total_width = usize::from(width.max(1));
-    let max_width = total_width.min(MAX_CONTENT_WIDTH);
+    let available = total_width
+        .saturating_sub(GUTTER_WIDTH.saturating_add(RIGHT_PAD))
+        .max(1);
+    let max_width = available.min(MAX_CONTENT_WIDTH);
     let mut lines = Vec::new();
     let mut heading_lines = Vec::new();
+    let mut heading_levels = Vec::new();
     let mut image_regions = Vec::new();
 
     for block in &document.blocks {
@@ -42,25 +78,27 @@ pub fn build(document: &Document, width: u16, theme: Theme, images: &ImageStore)
             Block::Heading { level, content } => {
                 if !lines.is_empty() {
                     lines.push(Line::default());
+                    if *level <= 2 {
+                        lines.push(Line::default());
+                    }
                 }
                 heading_lines.push(lines.len());
-                let prefix = heading_prefix(*level, theme);
-                let continuation = prefix
-                    .as_ref()
-                    .map(|prefix| " ".repeat(text_width(prefix.text.as_str())));
+                heading_levels.push(*level);
                 push_wrapped_inlines(
                     content,
-                    prefix,
-                    continuation,
+                    None,
+                    None,
                     heading_style(*level, theme),
                     max_width,
                     theme,
                     &mut lines,
                 );
-                if *level == 1 {
+                // H1 and H2 close with the same hairline rule, as they do on
+                // the web. H1 is set apart by its colour, not by a louder rule.
+                if matches!(*level, 1 | 2) {
                     lines.push(Line::from(Span::styled(
                         "─".repeat(max_width),
-                        Style::default().fg(theme.border),
+                        Style::default().fg(theme.reader_border),
                     )));
                 }
             }
@@ -71,8 +109,8 @@ pub fn build(document: &Document, width: u16, theme: Theme, images: &ImageStore)
                 let (prefix, base_style) = if *quote_depth > 0 {
                     (
                         Some(Prefix {
-                            text: "▎ ".repeat(*quote_depth as usize),
-                            style: Style::default().fg(theme.accent),
+                            text: "▎  ".repeat(*quote_depth as usize),
+                            style: Style::default().fg(theme.accent_soft),
                         }),
                         Style::default()
                             .fg(theme.text_muted)
@@ -98,10 +136,8 @@ pub fn build(document: &Document, width: u16, theme: Theme, images: &ImageStore)
                         .map(|start| format!("{}.", start + index as u64))
                         .unwrap_or_else(|| "•".to_string());
                     let prefix = Prefix {
-                        text: format!("{marker} "),
-                        style: Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
+                        text: format!("{marker}  "),
+                        style: Style::default().fg(theme.marker),
                     };
                     let continuation = " ".repeat(text_width(prefix.text.as_str()));
                     push_wrapped_inlines(
@@ -123,7 +159,7 @@ pub fn build(document: &Document, width: u16, theme: Theme, images: &ImageStore)
             }
             Block::ThematicBreak => lines.push(Line::from(Span::styled(
                 "┄".repeat(max_width),
-                Style::default().fg(theme.border),
+                Style::default().fg(theme.reader_border),
             ))),
             Block::Image { src, alt } => match images.asset(src) {
                 Some(Asset::Ready { rows, .. }) => {
@@ -143,10 +179,27 @@ pub fn build(document: &Document, width: u16, theme: Theme, images: &ImageStore)
         lines.push(Line::default());
     }
 
-    let margin = total_width.saturating_sub(max_width) / 2;
-    if margin > 0 {
-        let indent = " ".repeat(margin);
-        for line in &mut lines {
+    let margin = available.saturating_sub(max_width) / 2;
+    let mut ticks = vec![None; lines.len()];
+    for (line, level) in heading_lines.iter().zip(heading_levels.iter()) {
+        if let Some(slot) = ticks.get_mut(*line) {
+            *slot = Some(*level);
+        }
+    }
+
+    let indent = " ".repeat(margin);
+    for (index, line) in lines.iter_mut().enumerate() {
+        let tick = match ticks.get(index).copied().flatten() {
+            // A rule already marks H1 and H2; a tick as well marks them twice.
+            Some(level) if level >= 3 => {
+                Span::styled("▌", Style::default().fg(heading_tick(level, theme)))
+            }
+            _ => Span::raw(" "),
+        };
+        line.spans.insert(0, Span::raw(" "));
+        line.spans.insert(0, tick);
+        line.spans.insert(0, Span::raw("  "));
+        if margin > 0 {
             line.spans.insert(0, Span::raw(indent.clone()));
         }
     }
@@ -155,7 +208,7 @@ pub fn build(document: &Document, width: u16, theme: Theme, images: &ImageStore)
         lines,
         heading_lines,
         image_regions,
-        content_margin: margin,
+        content_margin: margin.saturating_add(GUTTER_WIDTH),
     }
 }
 
@@ -191,27 +244,27 @@ fn render_image_placeholder(
     max_width: usize,
     lines: &mut Vec<Line<'static>>,
 ) {
-    let frame_style = Style::default().fg(theme.border);
+    let bar = Style::default().fg(theme.accent_soft).bg(theme.surface);
+    let slab = Style::default().bg(theme.surface);
+    let inner_width = max_width.saturating_sub(3);
     let title = if alt.is_empty() { src } else { alt };
-    let title = truncate_width(title, max_width.saturating_sub(4));
 
-    let top_fill = max_width.saturating_sub(4 + text_width(title.as_str()));
-    lines.push(Line::from(vec![
-        Span::styled("┌─ ", frame_style),
-        Span::styled(title, Style::default().fg(theme.text_muted)),
-        Span::styled(format!(" {}", "─".repeat(top_fill)), frame_style),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("│ ", frame_style),
-        Span::styled(
-            truncate_width(src, max_width.saturating_sub(2)),
-            theme.muted(),
+    for (text, style) in [
+        (
+            title,
+            Style::default().fg(theme.text_muted).bg(theme.surface),
         ),
-    ]));
-    lines.push(Line::from(Span::styled(
-        format!("└─{}", "─".repeat(max_width.saturating_sub(2))),
-        frame_style,
-    )));
+        (src, Style::default().fg(theme.border).bg(theme.surface)),
+    ] {
+        let text = truncate_width(text, inner_width);
+        let padding = inner_width.saturating_sub(text_width(text.as_str()));
+        lines.push(Line::from(vec![
+            Span::styled("▎", bar),
+            Span::styled("  ", slab),
+            Span::styled(text, style),
+            Span::styled(" ".repeat(padding), slab),
+        ]));
+    }
 }
 
 struct LineBuilder {
@@ -367,51 +420,45 @@ fn render_code_block(
     theme: Theme,
     lines: &mut Vec<Line<'static>>,
 ) {
-    let label = truncate_width(language.unwrap_or("code"), max_width.saturating_sub(5));
-    let frame_style = Style::default().fg(theme.border).bg(theme.surface);
-    let label_style = Style::default()
-        .fg(theme.code)
-        .bg(theme.surface)
-        .add_modifier(Modifier::BOLD);
+    let bar = Style::default().fg(theme.accent_soft).bg(theme.surface);
+    let slab = Style::default().bg(theme.surface);
+    // One column for the bar, two of padding after it.
+    let inner_width = max_width.saturating_sub(3);
 
-    let header_width = text_width(&label);
+    let label = truncate_width(language.unwrap_or("code"), inner_width);
+    let label_pad = inner_width.saturating_sub(text_width(label.as_str()));
     lines.push(Line::from(vec![
-        Span::styled("┌─ ", frame_style),
-        Span::styled(label, label_style),
+        Span::styled("▎", bar),
+        Span::styled("  ", slab),
         Span::styled(
-            format!(
-                " {}┐",
-                "─".repeat(max_width.saturating_sub(header_width + 5))
-            ),
-            frame_style,
+            label,
+            Style::default().fg(theme.text_muted).bg(theme.surface),
         ),
+        Span::styled(" ".repeat(label_pad), slab),
     ]));
 
-    let fill_style = Style::default().bg(theme.surface);
-    let code_width = max_width.saturating_sub(4);
     for highlighted_line in syntax::highlight(language, code, theme) {
-        let mut line_width = 0;
-        let mut code_spans = vec![Span::styled("│ ", frame_style)];
+        let mut width = 0;
+        let mut spans = vec![Span::styled("▎", bar), Span::styled("  ", slab)];
         for span in highlighted_line {
-            let content =
-                truncate_width(span.content.as_ref(), code_width.saturating_sub(line_width));
-            line_width += text_width(content.as_str());
+            let content = truncate_width(span.content.as_ref(), inner_width.saturating_sub(width));
+            width += text_width(content.as_str());
             if !content.is_empty() {
-                code_spans.push(Span::styled(content, span.style));
+                spans.push(Span::styled(content, span.style.bg(theme.surface)));
             }
         }
-        code_spans.push(Span::styled(
-            " ".repeat(code_width.saturating_sub(line_width)),
-            fill_style,
+        spans.push(Span::styled(
+            " ".repeat(inner_width.saturating_sub(width)),
+            slab,
         ));
-        code_spans.push(Span::styled(" │", frame_style));
-        lines.push(Line::from(code_spans));
+        lines.push(Line::from(spans));
     }
 
-    lines.push(Line::from(Span::styled(
-        format!("└─{}┘", "─".repeat(max_width.saturating_sub(3))),
-        frame_style,
-    )));
+    // One blank slab row so the code never sits flush against the next block.
+    lines.push(Line::from(vec![
+        Span::styled("▎", bar),
+        Span::styled(" ".repeat(max_width.saturating_sub(1)), slab),
+    ]));
 }
 
 fn render_table(
@@ -439,28 +486,44 @@ fn render_table(
         return;
     }
     let widths = table_column_widths(&table_rows, max_width);
+    let ruled_width = widths
+        .iter()
+        .sum::<usize>()
+        .saturating_add(
+            widths
+                .len()
+                .saturating_sub(1)
+                .saturating_mul(TABLE_GAP.len()),
+        )
+        .min(max_width);
 
-    let border_style = Style::default().fg(theme.border);
-    lines.push(table_edge(&widths, '┌', '┬', '┐', border_style));
+    let first_body_row = usize::from(!headers.is_empty());
+    let body = table_rows
+        .iter()
+        .skip(first_body_row)
+        .map(|row| table_row(row, &widths, Style::default().fg(theme.text)))
+        .collect::<Vec<_>>();
+    // Once any record needs two lines, records need air between them or the
+    // table reads as one block of text.
+    let records_wrap = body.iter().any(|record| record.len() > 1);
+
     if !headers.is_empty() {
-        lines.push(table_row(
+        lines.extend(table_row(
             &table_rows[0],
             &widths,
-            theme.accent(),
-            border_style,
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ));
-        lines.push(table_edge(&widths, '├', '┼', '┤', border_style));
+        lines.push(Line::from(Span::styled(
+            "─".repeat(ruled_width),
+            Style::default().fg(theme.reader_border),
+        )));
     }
-    let first_body_row = usize::from(!headers.is_empty());
-    for (index, row) in table_rows.iter().skip(first_body_row).enumerate() {
-        let cell_style = if index % 2 == 1 {
-            Style::default().fg(theme.text).bg(theme.surface)
-        } else {
-            Style::default().fg(theme.text)
-        };
-        lines.push(table_row(row, &widths, cell_style, border_style));
+    for (index, record) in body.into_iter().enumerate() {
+        if records_wrap && index > 0 {
+            lines.push(Line::default());
+        }
+        lines.extend(record);
     }
-    lines.push(table_edge(&widths, '└', '┴', '┘', border_style));
 }
 
 fn table_cell_text(cell: &[Inline]) -> String {
@@ -470,7 +533,14 @@ fn table_cell_text(cell: &[Inline]) -> String {
         .to_string()
 }
 
+/// Columns are separated by whitespace rather than by rules.
+const TABLE_GAP: &str = "   ";
+
 fn table_column_widths(rows: &[Vec<String>], max_width: usize) -> Vec<usize> {
+    /// A column narrower than this wraps into confetti, so the row overflows
+    /// the measure instead.
+    const MIN_COLUMN: usize = 8;
+
     let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
     let mut widths = (0..column_count)
         .map(|column| {
@@ -483,15 +553,21 @@ fn table_column_widths(rows: &[Vec<String>], max_width: usize) -> Vec<usize> {
         })
         .collect::<Vec<_>>();
     let budget = max_width
-        .saturating_sub(column_count.saturating_mul(3).saturating_add(1))
+        .saturating_sub(
+            column_count
+                .saturating_sub(1)
+                .saturating_mul(TABLE_GAP.len()),
+        )
         .max(column_count);
 
+    // Take from the widest column first: cells wrap, so a narrow column costs
+    // height rather than content.
     while widths.iter().sum::<usize>() > budget {
         let Some((index, width)) = widths.iter().enumerate().max_by_key(|(_, width)| **width)
         else {
             break;
         };
-        if *width <= 1 {
+        if *width <= MIN_COLUMN {
             break;
         }
         widths[index] -= 1;
@@ -499,40 +575,78 @@ fn table_column_widths(rows: &[Vec<String>], max_width: usize) -> Vec<usize> {
     widths
 }
 
-fn table_row(
-    cells: &[String],
-    widths: &[usize],
-    cell_style: Style,
-    border_style: Style,
-) -> Line<'static> {
-    let mut spans = vec![Span::styled("│", border_style)];
-    for (column, width) in widths.iter().enumerate() {
-        let cell = cells.get(column).map(String::as_str).unwrap_or("");
-        let cell = truncate_width(cell, *width);
-        let padding = " ".repeat(width.saturating_sub(text_width(cell.as_str())));
-        spans.push(Span::styled(format!(" {cell}{padding} "), cell_style));
-        spans.push(Span::styled("│", border_style));
+/// Greedily wraps one cell to `width`, breaking inside a word only when the
+/// word cannot fit on a line of its own.
+fn wrap_cell(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
     }
-    Line::from(spans)
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+
+    for word in text.split_whitespace() {
+        let word_width = text_width(word);
+        if current_width > 0 && current_width + 1 + word_width > width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        if word_width > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            let mut rest = word;
+            while text_width(rest) > width {
+                let head = truncate_width(rest, width);
+                if head.is_empty() {
+                    break;
+                }
+                rest = &rest[head.len()..];
+                lines.push(head);
+            }
+            current.push_str(rest);
+            current_width = text_width(rest);
+            continue;
+        }
+        if current_width > 0 {
+            current.push(' ');
+            current_width += 1;
+        }
+        current.push_str(word);
+        current_width += word_width;
+    }
+
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
-fn table_edge(
-    widths: &[usize],
-    left: char,
-    joint: char,
-    right: char,
-    style: Style,
-) -> Line<'static> {
-    let mut content = String::new();
-    content.push(left);
-    for (index, width) in widths.iter().enumerate() {
-        content.push_str(&"─".repeat(width + 2));
-        if index + 1 < widths.len() {
-            content.push(joint);
-        }
-    }
-    content.push(right);
-    Line::from(Span::styled(content, style))
+/// One record, as however many lines its widest cell needs.
+fn table_row(cells: &[String], widths: &[usize], cell_style: Style) -> Vec<Line<'static>> {
+    let wrapped = widths
+        .iter()
+        .enumerate()
+        .map(|(column, width)| {
+            wrap_cell(cells.get(column).map(String::as_str).unwrap_or(""), *width)
+        })
+        .collect::<Vec<_>>();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+
+    (0..height)
+        .map(|row| {
+            let mut spans = Vec::new();
+            for (column, width) in widths.iter().enumerate() {
+                if column > 0 {
+                    spans.push(Span::styled(TABLE_GAP, cell_style));
+                }
+                let text = wrapped[column].get(row).cloned().unwrap_or_default();
+                let padding = " ".repeat(width.saturating_sub(text_width(text.as_str())));
+                spans.push(Span::styled(format!("{text}{padding}"), cell_style));
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn truncate_width(text: &str, max_width: usize) -> String {
@@ -580,19 +694,12 @@ fn inline_style(style: InlineStyle, link: bool, base: Style, theme: Theme) -> St
     result
 }
 
-fn heading_prefix(level: u8, theme: Theme) -> Option<Prefix> {
+/// Sub-headings below the ruled levels are marked by a tick in the left gutter
+/// rather than by a prefix glyph inside the text, so the measure stays flush.
+fn heading_tick(level: u8, theme: Theme) -> ratatui::style::Color {
     match level {
-        2 => Some(Prefix {
-            text: "❯ ".to_string(),
-            style: Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        }),
-        3..=6 => Some(Prefix {
-            text: "▹ ".to_string(),
-            style: Style::default().fg(theme.text_muted),
-        }),
-        _ => None,
+        3 => theme.accent_soft,
+        _ => theme.border,
     }
 }
 
@@ -601,8 +708,9 @@ fn heading_style(level: u8, theme: Theme) -> Style {
         1 => Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
-        2 => Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-        3 => Style::default().fg(theme.link).add_modifier(Modifier::BOLD),
+        // `link` is reserved for things you can follow: sub-headings step down
+        // through weight and the gutter tick instead.
+        2 | 3 => Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         _ => Style::default()
             .fg(theme.text_muted)
             .add_modifier(Modifier::BOLD),
@@ -613,10 +721,38 @@ fn heading_style(level: u8, theme: Theme) -> Style {
 mod tests {
     use std::path::Path;
 
-    use super::{build, text_width};
+    use ratatui::style::Modifier;
+    use ratatui::text::Line;
+
+    use super::{DocumentLayout, GUTTER_WIDTH, RIGHT_PAD, build, text_width};
     use crate::images::{Asset, ImageStore};
     use crate::markdown::Document;
     use crate::theme::Theme;
+
+    /// The reader width that yields `measure` columns of text once the gutter
+    /// and the right pad are taken out.
+    fn reader_width(measure: u16) -> u16 {
+        measure + (GUTTER_WIDTH + RIGHT_PAD) as u16
+    }
+
+    /// One laid out line with its gutter stripped, as the measure reads it.
+    fn measure_of(line: &Line<'_>, content_margin: usize) -> String {
+        crate::selection::content_text(line, content_margin)
+            .trim_end()
+            .to_string()
+    }
+
+    fn measure(layout: &DocumentLayout, index: usize) -> String {
+        measure_of(&layout.lines[index], layout.content_margin)
+    }
+
+    fn measures(layout: &DocumentLayout) -> Vec<String> {
+        layout
+            .lines
+            .iter()
+            .map(|line| measure_of(line, layout.content_margin))
+            .collect()
+    }
 
     #[test]
     fn wraps_text_to_the_available_width() {
@@ -630,13 +766,13 @@ mod tests {
     fn wraps_between_words_before_splitting_them() {
         let layout = build(
             &Document::parse("alpha beta gamma delta"),
-            11,
+            reader_width(11),
             Theme::default(),
             &ImageStore::default(),
         );
 
-        assert_eq!(layout.lines[0].to_string(), "alpha beta");
-        assert_eq!(layout.lines[1].to_string(), "gamma delta");
+        assert_eq!(measure(&layout, 0), "alpha beta");
+        assert_eq!(measure(&layout, 1), "gamma delta");
     }
 
     #[test]
@@ -651,16 +787,36 @@ mod tests {
     }
 
     #[test]
-    fn renders_heading_text_without_markdown_markers() {
+    fn renders_heading_text_without_markdown_markers_or_prefix_glyphs() {
+        let theme = Theme::default();
         let layout = build(
             &Document::parse("# Title"),
-            12,
-            Theme::default(),
+            reader_width(12),
+            theme,
             &ImageStore::default(),
         );
 
-        assert_eq!(layout.lines[0].to_string(), "Title");
-        assert_eq!(layout.lines[1].to_string(), "────────────");
+        // The marker never appears as a glyph in the text.
+        assert_eq!(measure(&layout, 0), "Title");
+        assert_eq!(measure(&layout, 1), "─".repeat(12));
+        assert!(
+            !layout.lines[0].spans.iter().any(|span| span.content == "▌"),
+            "a ruled heading should not also carry a gutter tick"
+        );
+
+        // A sub-heading has no rule, so the gutter tick marks it instead.
+        let layout = build(
+            &Document::parse("### Sub"),
+            reader_width(12),
+            theme,
+            &ImageStore::default(),
+        );
+        let tick = layout.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content == "▌")
+            .expect("a gutter tick on the sub-heading");
+        assert_eq!(tick.style.fg, Some(theme.accent_soft));
     }
 
     #[test]
@@ -685,23 +841,35 @@ mod tests {
     #[test]
     fn indents_wrapped_list_continuations() {
         let document = Document::parse("- A list item with enough text to wrap.");
-        let layout = build(&document, 16, Theme::default(), &ImageStore::default());
+        let layout = build(
+            &document,
+            reader_width(16),
+            Theme::default(),
+            &ImageStore::default(),
+        );
 
-        assert!(layout.lines[0].to_string().starts_with("• "));
-        assert!(layout.lines[1].to_string().starts_with("  "));
-        assert!(!layout.lines[1].to_string().starts_with("• "));
+        assert!(measure(&layout, 0).starts_with("•  "));
+        assert!(measure(&layout, 1).starts_with("   "));
+        assert!(!measure(&layout, 1).starts_with("•"));
     }
 
     #[test]
-    fn renders_table_columns_with_intersections() {
+    fn separates_table_columns_with_space_rather_than_rules() {
         let document = Document::parse("| Name | Value |\n| --- | --- |\n| MarkR | reader |");
-        let layout = build(&document, 24, Theme::default(), &ImageStore::default());
+        let layout = build(
+            &document,
+            reader_width(24),
+            Theme::default(),
+            &ImageStore::default(),
+        );
+        let lines = measures(&layout);
 
+        assert!(lines.iter().any(|line| line.starts_with("Name")));
+        assert!(lines.iter().any(|line| line.starts_with("MarkR")));
         assert!(
-            layout
-                .lines
+            lines
                 .iter()
-                .any(|line| line.to_string().starts_with("├") && line.to_string().contains('┼'))
+                .all(|line| !line.contains('│') && !line.contains('┼') && !line.contains('├'))
         );
     }
 
@@ -709,96 +877,158 @@ mod tests {
     fn keeps_unicode_graphemes_together_when_wrapping() {
         let layout = build(
             &Document::parse("👩‍💻 ready"),
-            2,
+            reader_width(2),
             Theme::default(),
             &ImageStore::default(),
         );
 
         assert_eq!(text_width("e\u{301}"), 1);
         assert_eq!(text_width("👩‍💻"), 2);
-        assert_eq!(layout.lines[0].to_string(), "👩‍💻");
+        assert_eq!(measure(&layout, 0), "👩‍💻");
     }
 
     #[test]
-    fn renders_blockquotes_with_an_accent_bar() {
+    fn renders_blockquotes_with_a_softened_bar() {
         let theme = Theme::default();
         let layout = build(
             &Document::parse("> quoted words"),
-            40,
+            reader_width(40),
             theme,
             &ImageStore::default(),
         );
-        let bar_span = &layout.lines[0].spans[0];
+        let bar = layout.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content == "▎  ")
+            .expect("a quote bar");
 
-        assert_eq!(bar_span.content, "▎ ");
-        assert_eq!(bar_span.style.fg, Some(theme.accent));
-        assert_eq!(layout.lines[0].to_string(), "▎ quoted words");
+        // The bar steps down from `accent` so quotes stop shouting.
+        assert_eq!(bar.style.fg, Some(theme.accent_soft));
+        assert_eq!(measure(&layout, 0), "▎  quoted words");
     }
 
     #[test]
-    fn fills_code_blocks_with_the_surface_background() {
+    fn fills_code_blocks_with_a_slab_and_a_warm_bar() {
         let theme = Theme::default();
         let layout = build(
             &Document::parse("```rust\nlet value = 1;\n```"),
-            40,
+            reader_width(40),
             theme,
             &ImageStore::default(),
+        );
+        let lines = measures(&layout);
+
+        assert!(lines.iter().any(|line| line.starts_with("▎  rust")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("▎  let value = 1;"))
+        );
+        // No line art anywhere: the slab is a fill, not a frame.
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains('┌') && !line.contains('└') && !line.contains('│'))
         );
 
         let code_line = layout
             .lines
             .iter()
-            .find(|line| line.to_string().starts_with("│ "))
-            .expect("a gutter line");
-        let total_width: usize = code_line
+            .find(|line| line.to_string().contains("let value = 1;"))
+            .expect("the code line");
+        let bar = code_line
             .spans
             .iter()
-            .map(|span| text_width(span.content.as_ref()))
-            .sum();
-        assert_eq!(total_width, 40);
+            .position(|span| span.content == "▎")
+            .expect("the slab bar");
+        assert_eq!(code_line.spans[bar].style.fg, Some(theme.accent_soft));
         assert!(
-            code_line
-                .spans
+            code_line.spans[bar..]
                 .iter()
                 .all(|span| span.style.bg == Some(theme.surface))
         );
-        assert!(
-            layout
-                .lines
-                .iter()
-                .any(|line| line.to_string().starts_with("┌─ rust"))
-        );
-        assert!(
-            layout
-                .lines
-                .iter()
-                .any(|line| line.to_string().starts_with("└─"))
-        );
-        assert!(
-            layout
-                .lines
-                .iter()
-                .filter(|line| line.to_string().starts_with("│ "))
-                .all(|line| line.to_string().ends_with(" │"))
-        );
+        let slab_width: usize = code_line.spans[bar..]
+            .iter()
+            .map(|span| text_width(span.content.as_ref()))
+            .sum();
+        assert_eq!(slab_width, 40);
     }
 
     #[test]
-    fn frames_tables_top_and_bottom() {
-        let document = Document::parse("| Name | Value |\n| --- | --- |\n| MarkR | reader |");
-        let layout = build(&document, 40, Theme::default(), &ImageStore::default());
-
-        assert!(
-            layout
-                .lines
-                .iter()
-                .any(|line| line.to_string().starts_with('┌'))
+    fn closes_h1_and_h2_with_a_hairline_rule() {
+        let theme = Theme::default();
+        let layout = build(
+            &Document::parse("# One\n\n## Two\n\n### Three"),
+            reader_width(12),
+            theme,
+            &ImageStore::default(),
         );
+
+        // H1 and H2 each close with the same quiet rule; H1 is set apart by its
+        // colour, not by a louder one. H3 gets no rule at all.
+        let rules = layout
+            .lines
+            .iter()
+            .filter(|line| measure_of(line, layout.content_margin).starts_with('─'))
+            .collect::<Vec<_>>();
+        assert_eq!(rules.len(), 2);
+        for rule in rules {
+            assert_eq!(measure_of(rule, layout.content_margin).chars().count(), 12);
+            assert_eq!(
+                rule.spans.last().expect("rule span").style.fg,
+                Some(theme.reader_border)
+            );
+        }
+    }
+
+    #[test]
+    fn wraps_table_cells_rather_than_cutting_them_short() {
+        let document = Document::parse(
+            "| Key | Action |\n| --- | --- |\n| Tab | Switch focus between the document and the sidebar |",
+        );
+        let layout = build(
+            &document,
+            reader_width(34),
+            Theme::default(),
+            &ImageStore::default(),
+        );
+        let rendered = measures(&layout).join(" ");
+
+        // Every word survives; the cell gains a line instead of losing its end.
+        for word in ["Switch", "focus", "between", "document", "sidebar"] {
+            assert!(rendered.contains(word), "`{word}` was cut from the table");
+        }
+    }
+
+    #[test]
+    fn rules_the_table_header_in_the_hairline_colour() {
+        let theme = Theme::default();
+        let document = Document::parse("| Name | Value |\n| --- | --- |\n| MarkR | reader |");
+        let layout = build(&document, reader_width(40), theme, &ImageStore::default());
+
+        let rule = layout
+            .lines
+            .iter()
+            .find(|line| {
+                let text = measure_of(line, layout.content_margin);
+                !text.is_empty() && text.chars().all(|character| character == '─')
+            })
+            .expect("a rule under the header");
+        assert_eq!(
+            rule.spans.last().expect("rule span").style.fg,
+            Some(theme.reader_border)
+        );
+
+        let header = layout
+            .lines
+            .iter()
+            .find(|line| measure_of(line, layout.content_margin).starts_with("Name"))
+            .expect("the header row");
         assert!(
-            layout
-                .lines
+            header
+                .spans
                 .iter()
-                .any(|line| line.to_string().starts_with('└'))
+                .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
         );
     }
 
@@ -810,8 +1040,12 @@ mod tests {
             Theme::default(),
             &ImageStore::default(),
         );
-        let margin = (120 - 88) / 2;
+        // 120 columns, less the gutter and pad, leaves 114 for an 80 column
+        // measure, so 17 of centring sit outside the gutter.
+        let margin = (120 - GUTTER_WIDTH - RIGHT_PAD - super::MAX_CONTENT_WIDTH) / 2;
 
+        assert_eq!(margin, 17);
+        assert_eq!(layout.content_margin, margin + GUTTER_WIDTH);
         assert_eq!(layout.lines[0].spans[0].content, " ".repeat(margin));
     }
 
@@ -839,20 +1073,17 @@ mod tests {
     #[test]
     fn renders_placeholder_for_missing_images() {
         let document = Document::parse("![Ghost](missing.png)");
-        let layout = build(&document, 40, Theme::default(), &ImageStore::default());
+        let layout = build(
+            &document,
+            reader_width(40),
+            Theme::default(),
+            &ImageStore::default(),
+        );
+        let lines = measures(&layout);
 
         assert!(layout.image_regions.is_empty());
-        assert!(
-            layout
-                .lines
-                .iter()
-                .any(|line| line.to_string().starts_with("┌─ Ghost"))
-        );
-        assert!(
-            layout
-                .lines
-                .iter()
-                .any(|line| line.to_string().contains("missing.png"))
-        );
+        assert!(lines.iter().any(|line| line.starts_with("▎  Ghost")));
+        assert!(lines.iter().any(|line| line.contains("missing.png")));
+        assert!(lines.iter().all(|line| !line.contains('┌')));
     }
 }
