@@ -112,9 +112,12 @@ pub struct App {
     pub document_layout: layout::DocumentLayout,
     /// The measure the currently decoded images were sized against.
     image_measure: usize,
-    /// Lines the viewport still has to travel, signed. A wheel notch lands
-    /// here rather than on `scroll`, and is eased out over the next few frames.
-    pending_scroll: isize,
+    /// Lines the viewport still has to travel, signed and fractional. A wheel
+    /// notch lands here rather than on `scroll`, and is paid off over time.
+    scroll_debt: f32,
+    /// When the glide was last advanced, so it travels by elapsed time rather
+    /// than by frame count and keeps its pace when the frame rate wobbles.
+    scroll_advanced: Option<Instant>,
     pub theme: Theme,
     pub images: ImageStore,
     pub file_explorer: FileExplorer,
@@ -183,12 +186,23 @@ struct UiSnapshot {
 /// Lines covered by one notch of a discrete mouse wheel. A trackpad sends a
 /// stream of events and feels fine at one line each; a wheel sends one event
 /// per notch, which made a real mouse crawl next to it.
-const MOUSE_WHEEL_LINES: isize = 3;
+const MOUSE_WHEEL_LINES: f32 = 3.0;
 
-/// Fraction of the outstanding scroll distance consumed each frame. A notch
-/// eases out over a handful of frames instead of teleporting, while a burst of
-/// trackpad events is caught up with quickly rather than queueing behind it.
-const SCROLL_EASING_DIVISOR: usize = 3;
+/// How briskly a glide travels, in lines per second per line still owed. The
+/// rate falls as the viewport nears its target, so the motion eases out.
+const SCROLL_RATE_GAIN: f32 = 9.0;
+
+/// The floor stops the eased tail from crawling, and sets the pace of a single
+/// notch: three lines at thirty-four a second is a line every thirty-two
+/// milliseconds, which reads as motion without feeling slow to start.
+const SCROLL_MIN_RATE: f32 = 34.0;
+
+/// The ceiling keeps a long flick from outrunning the eye entirely.
+const SCROLL_MAX_RATE: f32 = 420.0;
+
+/// A frame gap longer than this is a stall — a resize, a reload — and advancing
+/// a glide by the whole gap would make it jump.
+const MAX_FRAME_GAP: Duration = Duration::from_millis(50);
 
 impl App {
     pub fn new(
@@ -214,7 +228,8 @@ impl App {
             document,
             document_layout,
             image_measure,
-            pending_scroll: 0,
+            scroll_debt: 0.0,
+            scroll_advanced: None,
             theme,
             images,
             file_explorer,
@@ -375,7 +390,7 @@ impl App {
             || self.tab_transition.active(at)
             || self.help_transition.active(at)
             || self.message_animation_active(at)
-            || self.pending_scroll != 0
+            || self.gliding()
     }
 
     pub fn temporary_message(&self, at: Instant) -> Option<&str> {
@@ -505,7 +520,7 @@ impl App {
                 true
             }
             Message::Frame { at } => {
-                let glided = self.advance_scroll();
+                let glided = self.advance_scroll(at);
                 let was_active = self.animation_active(at) || glided;
                 if self
                     .temporary_message
@@ -1041,50 +1056,74 @@ impl App {
 
     /// Adds `lines` to the distance the viewport still has to travel. Returns
     /// whether there was anywhere left to travel to.
-    fn aim_scroll(&mut self, lines: isize) -> bool {
+    fn aim_scroll(&mut self, lines: f32) -> bool {
         let (position, limit) = if self.is_editing() {
             (self.editor_scroll, self.editor_max_scroll())
         } else {
             (self.scroll, self.max_scroll())
         };
-        let room = if lines < 0 {
+        let room = if lines < 0.0 {
             position > 0
         } else {
             position < limit
         };
         if !room {
-            self.pending_scroll = 0;
+            self.end_glide();
             return false;
         }
-        self.pending_scroll += lines;
+        self.scroll_debt += lines;
         true
     }
 
-    /// Consumes a share of the outstanding scroll distance. Called once per
-    /// frame while a glide is in flight.
-    fn advance_scroll(&mut self) -> bool {
-        if self.pending_scroll == 0 {
+    fn gliding(&self) -> bool {
+        self.scroll_debt.abs() >= f32::EPSILON
+    }
+
+    fn end_glide(&mut self) {
+        self.scroll_debt = 0.0;
+        self.scroll_advanced = None;
+    }
+
+    /// Pays off part of the outstanding scroll distance, by elapsed time rather
+    /// than by frame count, so the motion keeps its pace whatever the frame
+    /// rate is doing and spreads evenly between notches.
+    fn advance_scroll(&mut self, at: Instant) -> bool {
+        if !self.gliding() {
             return false;
         }
-        let step = self
-            .pending_scroll
-            .unsigned_abs()
-            .div_ceil(SCROLL_EASING_DIVISOR)
-            .max(1);
+        let elapsed = match self.scroll_advanced {
+            Some(last) => at.saturating_duration_since(last).min(MAX_FRAME_GAP),
+            None => Duration::from_millis(16),
+        };
+        self.scroll_advanced = Some(at);
+
+        let owed = self.scroll_debt.abs();
+        let direction = self.scroll_debt.signum();
+        let rate = (owed * SCROLL_RATE_GAIN).clamp(SCROLL_MIN_RATE, SCROLL_MAX_RATE);
+        let remaining = (owed - rate * elapsed.as_secs_f32()).max(0.0);
+
+        // Whole lines still owed before and after: the difference is exactly
+        // what to move now, so no fraction is ever rounded away or double paid.
+        let lines = (owed.ceil() - remaining.ceil()) as usize;
+        self.scroll_debt = if remaining < f32::EPSILON {
+            0.0
+        } else {
+            remaining * direction
+        };
+
         let before = (self.scroll, self.editor_scroll);
-        for _ in 0..step {
-            match (self.pending_scroll > 0, self.is_editing()) {
+        for _ in 0..lines {
+            match (direction > 0.0, self.is_editing()) {
                 (true, true) => self.editor_scroll_down(),
                 (true, false) => self.move_down(),
                 (false, true) => self.editor_scroll_up(),
                 (false, false) => self.move_up(),
             }
         }
-        self.pending_scroll -= (step as isize) * self.pending_scroll.signum();
 
-        if before == (self.scroll, self.editor_scroll) {
+        if lines > 0 && before == (self.scroll, self.editor_scroll) {
             // Against a stop: there is nowhere left to glide to.
-            self.pending_scroll = 0;
+            self.end_glide();
             return false;
         }
         true
@@ -1099,7 +1138,7 @@ impl App {
     /// Moves the viewport outright, abandoning any glide still in flight.
     fn jump_scroll(&mut self, line: usize) {
         self.scroll = line.min(self.max_scroll());
-        self.pending_scroll = 0;
+        self.end_glide();
     }
 
     fn set_editor_cursor(&mut self, position: CursorPosition) {
@@ -1754,13 +1793,20 @@ mod tests {
         }
     }
 
+    const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+
     /// Runs frames until the wheel glide has finished, as the event loop does.
-    fn drain_scroll(app: &mut App) {
-        for _ in 0..64 {
-            if !app.update(Message::Frame { at: Instant::now() }) {
-                break;
+    /// The clock is advanced explicitly because the glide travels by elapsed
+    /// time rather than by frame count.
+    fn drain_scroll(app: &mut App, clock: &mut Instant) -> usize {
+        for frame in 0..400 {
+            *clock += FRAME;
+            app.update(Message::Frame { at: *clock });
+            if !app.gliding() {
+                return frame + 1;
             }
         }
+        panic!("the glide never finished");
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Message {
@@ -2085,12 +2131,13 @@ mod tests {
             at: Instant::now(),
         });
 
+        let mut clock = Instant::now();
         app.update(mouse(MouseEventKind::ScrollDown, 35, 3));
-        drain_scroll(&mut app);
+        drain_scroll(&mut app, &mut clock);
         assert_eq!(app.scroll, super::MOUSE_WHEEL_LINES as usize);
 
         app.update(mouse(MouseEventKind::ScrollUp, 35, 3));
-        drain_scroll(&mut app);
+        drain_scroll(&mut app, &mut clock);
         assert_eq!(app.scroll, 0);
 
         app.update(key(KeyCode::Tab));
@@ -2099,7 +2146,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wheel_notch_eases_in_rather_than_landing_at_once() {
+    fn a_wheel_notch_arrives_a_line_at_a_time_rather_than_at_once() {
         let mut app = readme_app();
         app.update(Message::Resize {
             width: 120,
@@ -2110,14 +2157,25 @@ mod tests {
         app.update(mouse(MouseEventKind::ScrollDown, 60, 5));
         assert_eq!(app.scroll, 0, "the notch should not land on the event");
 
-        app.update(Message::Frame { at: Instant::now() });
-        let first = app.scroll;
-        assert!(
-            first > 0 && first < super::MOUSE_WHEEL_LINES as usize,
-            "expected part of the notch, got {first}"
-        );
+        let mut clock = Instant::now();
+        let mut seen = Vec::new();
+        for _ in 0..12 {
+            clock += FRAME;
+            app.update(Message::Frame { at: clock });
+            seen.push(app.scroll);
+        }
 
-        drain_scroll(&mut app);
+        // Never more than a line in any one frame: three lines fired off in a
+        // single frame is what read as a jump next to a trackpad.
+        assert!(
+            seen.windows(2).all(|pair| pair[1] - pair[0] <= 1),
+            "the notch jumped: {seen:?}"
+        );
+        // And spread out rather than crammed into the first frames.
+        assert!(
+            seen[0] == 0,
+            "the notch started landing immediately: {seen:?}"
+        );
         assert_eq!(app.scroll, super::MOUSE_WHEEL_LINES as usize);
     }
 
@@ -2135,14 +2193,12 @@ mod tests {
             app.update(mouse(MouseEventKind::ScrollDown, 60, 5));
         }
 
-        // Each frame takes a share of what is left, so twenty notches do not
-        // take twenty times as long to land as one.
-        let mut frames = 0;
-        while app.pending_scroll != 0 && frames < 200 {
-            app.update(Message::Frame { at: Instant::now() });
-            frames += 1;
-        }
-        assert!(frames < notches, "a burst queued up: {frames} frames");
+        // The rate rises with the distance outstanding, so a flick is caught up
+        // with rather than played back one notch at a time. At the single-notch
+        // rate sixty lines would take well over a hundred frames.
+        let mut clock = Instant::now();
+        let frames = drain_scroll(&mut app, &mut clock);
+        assert!(frames < 60, "a burst queued up: {frames} frames");
         assert_eq!(app.scroll, notches * super::MOUSE_WHEEL_LINES as usize);
     }
 
@@ -2168,7 +2224,8 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             },
         });
-        drain_scroll(&mut app);
+        let mut clock = at;
+        drain_scroll(&mut app, &mut clock);
         assert_eq!(app.scroll, super::MOUSE_WHEEL_LINES as usize);
 
         // Scrolling used to restart a transition that drove nothing visible,
@@ -2190,7 +2247,8 @@ mod tests {
         assert!(!app.update(mouse(MouseEventKind::Moved, 60, 5)));
         // A scroll that has somewhere to go does.
         assert!(app.update(mouse(MouseEventKind::ScrollDown, 60, 5)));
-        drain_scroll(&mut app);
+        let mut clock = Instant::now();
+        drain_scroll(&mut app, &mut clock);
         // A scroll already against the top does not.
         app.jump_scroll(0);
         assert!(!app.update(mouse(MouseEventKind::ScrollUp, 60, 5)));
@@ -2207,13 +2265,14 @@ mod tests {
         app.update(key(KeyCode::Char('e')));
         assert!(app.editor_lines().len() > app.document_height());
 
+        let mut clock = Instant::now();
         app.update(mouse(MouseEventKind::ScrollDown, 35, 3));
-        drain_scroll(&mut app);
+        drain_scroll(&mut app, &mut clock);
         assert_eq!(app.editor_scroll, super::MOUSE_WHEEL_LINES as usize);
         assert_eq!(app.scroll, 0);
 
         app.update(mouse(MouseEventKind::ScrollUp, 35, 3));
-        drain_scroll(&mut app);
+        drain_scroll(&mut app, &mut clock);
         assert_eq!(app.editor_scroll, 0);
         assert_eq!(app.scroll, 0);
     }
