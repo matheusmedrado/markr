@@ -184,18 +184,20 @@ struct UiSnapshot {
 }
 
 /// Lines covered by one notch of a discrete mouse wheel. A trackpad sends a
-/// stream of events and feels fine at one line each; a wheel sends one event
-/// per notch, which made a real mouse crawl next to it.
-const MOUSE_WHEEL_LINES: f32 = 3.0;
+/// stream of events and covers ground by volume; a wheel sends one event per
+/// detent, so a detent has to be worth enough that reading a page does not
+/// mean spinning the wheel raw.
+const MOUSE_WHEEL_LINES: f32 = 5.0;
 
 /// How briskly a glide travels, in lines per second per line still owed. The
 /// rate falls as the viewport nears its target, so the motion eases out.
-const SCROLL_RATE_GAIN: f32 = 9.0;
+const SCROLL_RATE_GAIN: f32 = 11.0;
 
 /// The floor stops the eased tail from crawling, and sets the pace of a single
-/// notch: three lines at thirty-four a second is a line every thirty-two
-/// milliseconds, which reads as motion without feeling slow to start.
-const SCROLL_MIN_RATE: f32 = 34.0;
+/// notch: five lines at fifty a second is a line every twenty milliseconds, so
+/// a detent covers real ground while still reading as motion rather than a
+/// jump, and a long flick comes to rest promptly instead of drifting.
+const SCROLL_MIN_RATE: f32 = 50.0;
 
 /// The ceiling keeps a long flick from outrunning the eye entirely.
 const SCROLL_MAX_RATE: f32 = 420.0;
