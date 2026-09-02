@@ -119,6 +119,11 @@ fn run(
                     break;
                 }
             }
+            // A trackpad keeps the queue busy, so an animation would never get
+            // a turn if frames only advanced when the queue ran dry.
+            if !app.should_quit() && app.animation_active(Instant::now()) {
+                redraw |= app.update(Message::Frame { at: Instant::now() });
+            }
         } else {
             if app.animation_active(Instant::now()) {
                 redraw = app.update(Message::Frame { at: Instant::now() });
