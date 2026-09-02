@@ -87,7 +87,6 @@ pub enum Message {
     },
     Mouse {
         event: crossterm::event::MouseEvent,
-        at: Instant,
     },
     Tick,
     Resize {
@@ -479,7 +478,7 @@ impl App {
             // Mouse capture delivers motion events too. Redrawing on every
             // one of them kept the reader repainting whenever the pointer
             // crossed it, for nothing.
-            Message::Mouse { event, .. } => self.handle_mouse(event),
+            Message::Mouse { event } => self.handle_mouse(event),
             Message::Tick => self.reload_if_changed(),
             Message::Resize { width, height, at } => {
                 if self.terminal_width == width && self.terminal_height == height {
@@ -1699,7 +1698,6 @@ mod tests {
                 row,
                 modifiers: KeyModifiers::NONE,
             },
-            at: Instant::now(),
         }
     }
 
@@ -2046,7 +2044,6 @@ mod tests {
                 row: 5,
                 modifiers: KeyModifiers::NONE,
             },
-            at,
         });
         assert_eq!(app.scroll, super::MOUSE_WHEEL_LINES);
 
