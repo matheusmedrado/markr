@@ -34,6 +34,18 @@ pub enum ResponsiveMode {
     Fullscreen,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsavedAction {
+    CancelEdit,
+    Quit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExternalPromptAction {
+    Save,
+    Finish(UnsavedAction),
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Transition {
     from: f32,
@@ -114,6 +126,9 @@ pub struct App {
     pub editor: Option<EditorBuffer>,
     pub editor_scroll: usize,
     pub editor_horizontal_scroll: usize,
+    pub unsaved_action: Option<UnsavedAction>,
+    pub external_change_detected: bool,
+    external_prompt: Option<ExternalPromptAction>,
     pub search_query: String,
     pub search_input: Option<String>,
     search_matches: Vec<SearchMatch>,
@@ -151,6 +166,9 @@ struct UiSnapshot {
     editor_scroll: usize,
     editor_horizontal_scroll: usize,
     editor_dirty: bool,
+    unsaved_action: Option<UnsavedAction>,
+    external_change_detected: bool,
+    external_prompt: Option<ExternalPromptAction>,
     search_query: String,
     search_input: Option<String>,
     search_selected: usize,
@@ -173,7 +191,9 @@ impl App {
         images.load(document_dir.as_deref(), &document);
         let initial_started = Instant::now();
         let terminal_width: u16 = 120;
-        let document_width = terminal_width.saturating_sub(33).saturating_sub(5);
+        let document_width = terminal_width
+            .saturating_sub(30)
+            .saturating_sub(layout::RAIL_WIDTH);
         let document_layout = layout::build(&document, document_width, theme, &images);
         Ok(Self {
             workspace,
@@ -194,6 +214,9 @@ impl App {
             editor: None,
             editor_scroll: 0,
             editor_horizontal_scroll: 0,
+            unsaved_action: None,
+            external_change_detected: false,
+            external_prompt: None,
             search_query: String::new(),
             search_input: None,
             search_matches: Vec::new(),
@@ -249,18 +272,42 @@ impl App {
         self.editor.as_ref().is_some_and(EditorBuffer::dirty)
     }
 
+    pub fn has_unsaved_prompt(&self) -> bool {
+        self.unsaved_action.is_some()
+    }
+
+    pub fn has_external_prompt(&self) -> bool {
+        self.external_prompt.is_some()
+    }
+
+    pub fn editor_text(&self) -> Option<String> {
+        self.editor.as_ref().map(EditorBuffer::text)
+    }
+
     pub fn editor_content_width(&self) -> usize {
         let line_number_width = self.editor_lines().len().max(1).to_string().len();
         usize::from(self.document_width()).saturating_sub(line_number_width + 3)
     }
 
     pub fn document_width(&self) -> u16 {
-        let reader_width = self.reader_outer_width();
-        reader_width.saturating_sub(5)
+        self.reader_outer_width().saturating_sub(layout::RAIL_WIDTH)
     }
 
+    /// The reader owns everything between the header, its spacer row and the
+    /// status bar.
     fn document_height(&self) -> usize {
-        usize::from(self.terminal_height.saturating_sub(4).max(1))
+        usize::from(self.terminal_height.saturating_sub(3).max(1))
+    }
+
+    /// How far through the document the viewport sits, as a percentage.
+    pub fn reading_progress(&self) -> usize {
+        let total = self.document_layout.lines.len();
+        let height = self.document_height();
+        if total <= height {
+            return 100;
+        }
+        let span = total.saturating_sub(height);
+        self.scroll.min(span).saturating_mul(100) / span
     }
 
     fn max_scroll(&self) -> usize {
@@ -316,41 +363,30 @@ impl App {
     }
 
     fn reader_outer_width(&self) -> u16 {
-        let gutter = if self.terminal_width < 72 { 0 } else { 1 };
         match self.responsive_mode {
-            ResponsiveMode::Attached if self.sidebar_visible => self
-                .terminal_width
-                .saturating_sub(self.sidebar_width())
-                .saturating_sub(1)
-                .saturating_sub(gutter * 2),
+            ResponsiveMode::Attached if self.sidebar_visible => {
+                self.terminal_width.saturating_sub(self.sidebar_width())
+            }
             ResponsiveMode::Fullscreen => 0,
-            _ => self.terminal_width.saturating_sub(gutter * 2),
+            _ => self.terminal_width,
         }
     }
 
     pub fn reader_outer_area(&self) -> ratatui::layout::Rect {
+        // Row 0 is the header, row 1 the spacer, the last row the status bar.
         let total = ratatui::layout::Rect::new(
             0,
-            1,
+            2,
             self.terminal_width,
-            self.terminal_height.saturating_sub(2),
+            self.terminal_height.saturating_sub(3),
         );
-        let _gutter = if self.terminal_width < 72 { 0 } else { 1 };
         let x = if self.responsive_mode == ResponsiveMode::Attached && self.sidebar_visible {
-            total
-                .x
-                .saturating_add(self.sidebar_width().saturating_add(1))
+            total.x.saturating_add(self.sidebar_width())
         } else {
             total.x
         };
         let width = total.width.saturating_sub(x.saturating_sub(total.x));
-        let horizontal_gutter = if total.width < 72 { 0 } else { 1 };
-        ratatui::layout::Rect::new(
-            x.saturating_add(horizontal_gutter),
-            total.y,
-            width.saturating_sub(horizontal_gutter.saturating_mul(2)),
-            total.height,
-        )
+        ratatui::layout::Rect::new(x, total.y, width, total.height)
     }
 
     fn set_sidebar_visible(&mut self, visible: bool, at: Instant) {
@@ -479,6 +515,9 @@ impl App {
             editor_scroll: self.editor_scroll,
             editor_horizontal_scroll: self.editor_horizontal_scroll,
             editor_dirty: self.editor_dirty(),
+            unsaved_action: self.unsaved_action,
+            external_change_detected: self.external_change_detected,
+            external_prompt: self.external_prompt,
             search_query: self.search_query.clone(),
             search_input: self.search_input.clone(),
             search_selected: self.search_selected,
@@ -489,8 +528,18 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent, at: Instant) {
+        if self.external_prompt.is_some() {
+            self.handle_external_prompt(key, at);
+            return;
+        }
+
+        if self.unsaved_action.is_some() {
+            self.handle_unsaved_prompt(key, at);
+            return;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.quit = true;
+            self.request_quit(at);
             return;
         }
 
@@ -618,12 +667,52 @@ impl App {
 
     fn handle_editor_key(&mut self, key: KeyEvent, at: Instant) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
-            self.save_editor(at);
+            if self.external_change_detected {
+                self.open_external_prompt(ExternalPromptAction::Save, at);
+            } else {
+                self.save_editor(at);
+            }
             return;
         }
 
+        let page_amount = self.document_height().saturating_sub(1).max(1);
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('z') => {
+                    self.editor_move(|editor| editor.undo());
+                    self.ensure_editor_cursor_visible();
+                    return;
+                }
+                KeyCode::Char('y') => {
+                    self.editor_move(|editor| editor.redo());
+                    self.ensure_editor_cursor_visible();
+                    return;
+                }
+                KeyCode::Char('u') => {
+                    self.editor_move(|editor| {
+                        for _ in 0..page_amount {
+                            editor.move_up();
+                        }
+                    });
+                    self.ensure_editor_cursor_visible();
+                    return;
+                }
+                KeyCode::Char('d') => {
+                    self.editor_move(|editor| {
+                        for _ in 0..page_amount {
+                            editor.move_down();
+                        }
+                    });
+                    self.ensure_editor_cursor_visible();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
-            KeyCode::Esc => self.cancel_editor(at),
+            KeyCode::Char('q') => self.request_quit(at),
+            KeyCode::Esc => self.request_cancel_editor(at),
             KeyCode::Left => self.editor_move(|editor| editor.move_left()),
             KeyCode::Right => self.editor_move(|editor| editor.move_right()),
             KeyCode::Up => self.editor_move(|editor| editor.move_up()),
@@ -631,12 +720,12 @@ impl App {
             KeyCode::Home => self.editor_move(|editor| editor.move_home()),
             KeyCode::End => self.editor_move(|editor| editor.move_end()),
             KeyCode::PageUp => self.editor_move(|editor| {
-                for _ in 0..10 {
+                for _ in 0..page_amount {
                     editor.move_up();
                 }
             }),
             KeyCode::PageDown => self.editor_move(|editor| {
-                for _ in 0..10 {
+                for _ in 0..page_amount {
                     editor.move_down();
                 }
             }),
@@ -657,6 +746,114 @@ impl App {
             _ => {}
         }
         self.ensure_editor_cursor_visible();
+    }
+
+    fn handle_unsaved_prompt(&mut self, key: KeyEvent, at: Instant) {
+        let Some(action) = self.unsaved_action else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Char('s') | KeyCode::Enter => {
+                if self.external_change_detected {
+                    self.unsaved_action = None;
+                    self.open_external_prompt(ExternalPromptAction::Finish(action), at);
+                } else if self.save_editor(at) {
+                    self.unsaved_action = None;
+                    self.finish_editor_action(action, at);
+                }
+            }
+            KeyCode::Char('d') => {
+                self.unsaved_action = None;
+                self.discard_editor(at, action);
+            }
+            KeyCode::Esc | KeyCode::Char('c') => {
+                self.unsaved_action = None;
+                self.set_message("continuing edit", at);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_external_prompt(&mut self, key: KeyEvent, at: Instant) {
+        let Some(action) = self.external_prompt else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Char('o') | KeyCode::Enter => {
+                if self.save_editor(at) {
+                    self.external_prompt = None;
+                    self.finish_external_action(action, at);
+                }
+            }
+            KeyCode::Char('r') => {
+                if self.reload_editor_from_disk() {
+                    self.external_prompt = None;
+                    self.finish_external_action(action, at);
+                }
+            }
+            KeyCode::Esc => {
+                self.external_prompt = None;
+                if let ExternalPromptAction::Finish(unsaved_action) = action {
+                    self.unsaved_action = Some(unsaved_action);
+                    self.set_message("unsaved changes · s save · d discard · Esc continue", at);
+                } else {
+                    self.set_message("save cancelled", at);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn open_external_prompt(&mut self, action: ExternalPromptAction, at: Instant) {
+        self.external_prompt = Some(action);
+        self.set_message(
+            "file changed on disk · o overwrite · r reload · Esc continue",
+            at,
+        );
+    }
+
+    fn finish_external_action(&mut self, action: ExternalPromptAction, at: Instant) {
+        if let ExternalPromptAction::Finish(unsaved_action) = action {
+            self.finish_editor_action(unsaved_action, at);
+        }
+    }
+
+    fn request_cancel_editor(&mut self, at: Instant) {
+        if self.editor_dirty() {
+            self.unsaved_action = Some(UnsavedAction::CancelEdit);
+            self.set_message("unsaved changes · s save · d discard · Esc continue", at);
+        } else {
+            self.cancel_editor(at);
+        }
+    }
+
+    fn request_quit(&mut self, at: Instant) {
+        if self.editor_dirty() {
+            self.unsaved_action = Some(UnsavedAction::Quit);
+            self.set_message("unsaved changes · s save · d discard · Esc continue", at);
+        } else {
+            self.quit = true;
+        }
+    }
+
+    fn finish_editor_action(&mut self, action: UnsavedAction, at: Instant) {
+        match action {
+            UnsavedAction::CancelEdit => self.cancel_editor(at),
+            UnsavedAction::Quit => self.quit = true,
+        }
+    }
+
+    fn discard_editor(&mut self, at: Instant, action: UnsavedAction) {
+        self.editor = None;
+        self.editor_scroll = 0;
+        self.editor_horizontal_scroll = 0;
+        self.load_active_file();
+        match action {
+            UnsavedAction::CancelEdit => self.set_message("changes discarded", at),
+            UnsavedAction::Quit => self.quit = true,
+        }
     }
 
     fn editor_move(&mut self, action: impl FnOnce(&mut EditorBuffer)) {
@@ -696,13 +893,12 @@ impl App {
                 self.editor = Some(EditorBuffer::from_text(&content));
                 self.editor_scroll = 0;
                 self.editor_horizontal_scroll = 0;
+                self.last_modified = modified_time(self.workspace.active_path());
+                self.external_change_detected = false;
                 self.clear_selection();
                 self.clear_search();
                 self.focus = Focus::Document;
-                self.set_message(
-                    format!("editing {path_display} · Ctrl-S save · Esc cancel"),
-                    at,
-                );
+                self.set_message(format!("editing {path_display} · ^S save · Esc leave"), at);
             }
             Err(error) => {
                 let message = format!("Cannot edit file: {error}");
@@ -712,9 +908,9 @@ impl App {
         }
     }
 
-    fn save_editor(&mut self, at: Instant) {
+    fn save_editor(&mut self, at: Instant) -> bool {
         let Some(content) = self.editor.as_ref().map(EditorBuffer::text) else {
-            return;
+            return false;
         };
         match self.workspace.save_content(&content) {
             Ok(()) => {
@@ -722,12 +918,15 @@ impl App {
                     editor.mark_clean();
                 }
                 self.apply_document_content(&content);
+                self.external_change_detected = false;
                 self.set_message("saved", at);
+                true
             }
             Err(error) => {
                 let message = format!("Cannot save file: {error}");
                 self.error = Some(message.clone());
                 self.set_message(message, at);
+                false
             }
         }
     }
@@ -740,40 +939,108 @@ impl App {
         self.set_message("edit cancelled", at);
     }
 
+    fn reload_editor_from_disk(&mut self) -> bool {
+        match self.workspace.reload_content() {
+            Ok(content) => {
+                self.editor = Some(EditorBuffer::from_text(&content));
+                self.editor_scroll = 0;
+                self.editor_horizontal_scroll = 0;
+                self.apply_document_content(&content);
+                self.external_change_detected = false;
+                true
+            }
+            Err(error) => {
+                self.error = Some(format!("Cannot reload file: {error}"));
+                false
+            }
+        }
+    }
+
     fn handle_mouse(&mut self, event: crossterm::event::MouseEvent, at: Instant) {
         use crossterm::event::{MouseButton, MouseEventKind};
 
-        if self.focus != Focus::Document {
+        if self.focus != Focus::Document
+            || self.unsaved_action.is_some()
+            || self.external_prompt.is_some()
+        {
             return;
         }
 
         match event.kind {
             MouseEventKind::ScrollUp if self.mouse_is_over_reader(event.column, event.row) => {
-                self.move_up(at);
+                if self.is_editing() {
+                    self.editor_scroll_up();
+                } else {
+                    self.move_up(at);
+                }
             }
             MouseEventKind::ScrollDown if self.mouse_is_over_reader(event.column, event.row) => {
-                self.move_down(at);
+                if self.is_editing() {
+                    self.editor_scroll_down();
+                } else {
+                    self.move_down(at);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) if self.is_editing() => {
+                if let Some(position) = self.editor_position_at(event.column, event.row) {
+                    self.set_editor_cursor(position);
+                }
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(position) = self.document_position_at(event.column, event.row) {
                     self.start_selection(position);
                 }
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
+            MouseEventKind::Drag(MouseButton::Left) if !self.is_editing() => {
                 if let Some(position) = self.document_position_at(event.column, event.row) {
                     self.update_selection(position);
                 }
             }
             MouseEventKind::Up(MouseButton::Left)
-                if self
-                    .selection
-                    .as_ref()
-                    .is_some_and(|selection| selection.is_empty()) =>
+                if !self.is_editing()
+                    && self
+                        .selection
+                        .as_ref()
+                        .is_some_and(|selection| selection.is_empty()) =>
             {
                 self.clear_selection();
             }
             _ => {}
         }
+    }
+
+    fn set_editor_cursor(&mut self, position: CursorPosition) {
+        if let Some(editor) = self.editor.as_mut() {
+            editor.set_cursor(position);
+            self.ensure_editor_cursor_visible();
+        }
+    }
+
+    fn editor_position_at(&self, screen_x: u16, screen_y: u16) -> Option<CursorPosition> {
+        if !self.mouse_is_over_reader(screen_x, screen_y) {
+            return None;
+        }
+
+        let document_area = self.reader_outer_area();
+        let inner = layout::editor_inner(document_area);
+        let (inner_x, inner_y) = (inner.x, inner.y);
+        let line = self
+            .editor_scroll
+            .saturating_add(usize::from(screen_y.saturating_sub(inner_y)));
+        if line >= self.editor_lines().len() {
+            return None;
+        }
+
+        let line_number_width = self.editor_lines().len().max(1).to_string().len();
+        let text_start = inner_x.saturating_add(line_number_width as u16 + 5);
+        let display_column = self
+            .editor_horizontal_scroll
+            .saturating_add(usize::from(screen_x.saturating_sub(text_start)));
+        let column = self
+            .editor
+            .as_ref()?
+            .cursor_column_at_display_width(line, display_column)?;
+        Some(CursorPosition::new(line, column))
     }
 
     fn mouse_is_over_reader(&self, screen_x: u16, screen_y: u16) -> bool {
@@ -785,10 +1052,9 @@ impl App {
         }
 
         let document_area = self.reader_outer_area();
-        let inner_x = document_area.x.saturating_add(3);
-        let inner_y = document_area.y.saturating_add(1);
-        let inner_width = document_area.width.saturating_sub(5);
-        let inner_height = document_area.height.saturating_sub(2);
+        let inner = layout::reader_inner(document_area);
+        let (inner_x, inner_y) = (inner.x, inner.y);
+        let (inner_width, inner_height) = (inner.width, inner.height);
 
         screen_x >= inner_x
             && screen_x < inner_x.saturating_add(inner_width)
@@ -809,10 +1075,9 @@ impl App {
             return None;
         }
 
-        let inner_x = document_area.x.saturating_add(3);
-        let inner_y = document_area.y.saturating_add(1);
-        let inner_width = document_area.width.saturating_sub(5);
-        let inner_height = document_area.height.saturating_sub(2);
+        let inner = layout::reader_inner(document_area);
+        let (inner_x, inner_y) = (inner.x, inner.y);
+        let (inner_width, inner_height) = (inner.width, inner.height);
 
         if screen_x < inner_x
             || screen_x >= inner_x.saturating_add(inner_width)
@@ -1086,6 +1351,18 @@ impl App {
         self.selection_transition = Transition::new(0.0, 1.0, at, Duration::from_millis(90));
     }
 
+    fn editor_scroll_up(&mut self) {
+        self.editor_scroll = self.editor_scroll.saturating_sub(1);
+    }
+
+    fn editor_scroll_down(&mut self) {
+        let max_scroll = self
+            .editor_lines()
+            .len()
+            .saturating_sub(self.document_height());
+        self.editor_scroll = self.editor_scroll.saturating_add(1).min(max_scroll);
+    }
+
     fn page_up(&mut self) {
         let amount = self.terminal_height.saturating_sub(5) as usize;
         self.scroll = self.scroll.saturating_sub(amount.max(1));
@@ -1207,6 +1484,17 @@ impl App {
 
     fn reload_if_changed(&mut self) -> bool {
         if self.is_editing() {
+            if self.workspace.active_path().is_some()
+                && modified_time(self.workspace.active_path()) != self.last_modified
+                && !self.external_change_detected
+            {
+                self.external_change_detected = true;
+                self.set_message(
+                    "file changed on disk · review before saving",
+                    Instant::now(),
+                );
+                return true;
+            }
             return false;
         }
         let current_modified = modified_time(self.workspace.active_path());
@@ -1222,6 +1510,8 @@ impl App {
         self.editor = None;
         self.editor_scroll = 0;
         self.editor_horizontal_scroll = 0;
+        self.external_change_detected = false;
+        self.external_prompt = None;
         match self.workspace.reload_content() {
             Ok(content) => self.apply_document_content(&content),
             Err(error) => self.error = Some(error.to_string()),
@@ -1328,9 +1618,11 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Instant;
+    use std::time::{Instant, SystemTime};
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::text::Line;
     use ratatui_image::picker::Picker;
 
@@ -1482,12 +1774,125 @@ mod tests {
         app.update(key(KeyCode::End));
         app.update(key(KeyCode::Char('!')));
         app.update(key(KeyCode::Esc));
+        app.update(key(KeyCode::Char('d')));
 
         assert!(!app.is_editing());
         assert_eq!(
             fs::read_to_string(&path).expect("original document"),
             "# One"
         );
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn prompts_before_cancelling_dirty_edits() {
+        let (path, mut app) = temporary_document();
+
+        app.update(key(KeyCode::Char('e')));
+        app.update(key(KeyCode::End));
+        app.update(key(KeyCode::Char('!')));
+        app.update(key(KeyCode::Esc));
+
+        assert!(app.has_unsaved_prompt());
+        assert!(app.is_editing());
+
+        app.update(key(KeyCode::Esc));
+        assert!(!app.has_unsaved_prompt());
+        assert!(app.is_editing());
+        assert!(app.editor_dirty());
+
+        app.update(key(KeyCode::Esc));
+        assert!(app.has_unsaved_prompt());
+        app.update(key(KeyCode::Char('d')));
+        assert!(!app.is_editing());
+        assert_eq!(
+            fs::read_to_string(&path).expect("unchanged document"),
+            "# One"
+        );
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn prompts_before_quitting_and_can_save_first() {
+        let (path, mut app) = temporary_document();
+
+        app.update(key(KeyCode::Char('e')));
+        app.update(key(KeyCode::End));
+        app.update(key(KeyCode::Char('!')));
+        app.update(control_key(KeyCode::Char('c')));
+
+        assert!(app.has_unsaved_prompt());
+        assert!(!app.should_quit());
+
+        app.update(key(KeyCode::Char('s')));
+        assert!(app.should_quit());
+        assert_eq!(fs::read_to_string(&path).expect("saved document"), "# One!");
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn mouse_click_places_the_editor_cursor() {
+        let mut app = readme_app();
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+        app.update(key(KeyCode::Char('e')));
+
+        let reader = app.reader_outer_area();
+        let inner = crate::layout::editor_inner(reader);
+        let (inner_x, inner_y) = (inner.x, inner.y);
+        let line_number_width = app.editor_lines().len().to_string().len();
+        let text_start = inner_x.saturating_add(line_number_width as u16 + 5);
+        app.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            text_start + 2,
+            inner_y,
+        ));
+
+        assert_eq!(
+            app.editor_cursor(),
+            Some(crate::selection::CursorPosition::new(0, 2))
+        );
+    }
+
+    #[test]
+    fn editor_undo_and_redo_update_the_buffer() {
+        let (path, mut app) = temporary_document();
+
+        app.update(key(KeyCode::Char('e')));
+        app.update(key(KeyCode::End));
+        app.update(key(KeyCode::Char('!')));
+        app.update(control_key(KeyCode::Char('z')));
+        assert_eq!(app.editor_text().as_deref(), Some("# One"));
+        assert!(!app.editor_dirty());
+
+        app.update(control_key(KeyCode::Char('y')));
+        assert_eq!(app.editor_text().as_deref(), Some("# One!"));
+        assert!(app.editor_dirty());
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn detects_external_changes_and_can_reload_them() {
+        let (path, mut app) = temporary_document();
+
+        app.update(key(KeyCode::Char('e')));
+        app.last_modified = Some(SystemTime::UNIX_EPOCH);
+        fs::write(&path, "# External").expect("external document change");
+        app.update(Message::Tick);
+
+        assert!(app.external_change_detected);
+        assert_eq!(app.editor_text().as_deref(), Some("# One"));
+
+        app.update(control_key(KeyCode::Char('s')));
+        assert!(app.has_external_prompt());
+        app.update(key(KeyCode::Char('r')));
+
+        assert!(!app.has_external_prompt());
+        assert!(!app.external_change_detected);
+        assert_eq!(app.editor_text().as_deref(), Some("# External"));
         fs::remove_file(path).expect("remove editor fixture");
     }
 
@@ -1587,6 +1992,26 @@ mod tests {
 
         app.update(key(KeyCode::Tab));
         app.update(mouse(MouseEventKind::ScrollDown, 5, 3));
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_the_editor_viewport() {
+        let mut app = readme_app();
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+        app.update(key(KeyCode::Char('e')));
+        assert!(app.editor_lines().len() > app.document_height());
+
+        app.update(mouse(MouseEventKind::ScrollDown, 35, 3));
+        assert_eq!(app.editor_scroll, 1);
+        assert_eq!(app.scroll, 0);
+
+        app.update(mouse(MouseEventKind::ScrollUp, 35, 3));
+        assert_eq!(app.editor_scroll, 0);
         assert_eq!(app.scroll, 0);
     }
 
