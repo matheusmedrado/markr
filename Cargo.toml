@@ -19,3 +19,16 @@ unicode-segmentation = "1.12"
 
 [dev-dependencies]
 pretty_assertions = "1.4"
+
+# `cargo run` is what the README tells people to use, and a fully unoptimised
+# syntect and image make the reader feel slow for no good reason. Dependencies
+# are built once at full optimisation; this crate keeps a light setting so its
+# own builds stay quick and debuggable.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
