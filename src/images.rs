@@ -196,7 +196,7 @@ mod tests {
         let mut store = ImageStore::new(picker);
         let document = Document::parse("![logo](assets/markr-logo.png)");
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        store.load(Some(root), &document, crate::layout::COMFORTABLE_MEASURE);
+        store.load(Some(root), &document, 80);
 
         let Some(Asset::Ready { protocol, .. }) = store.asset("assets/markr-logo.png") else {
             panic!("sliced image protocol");
