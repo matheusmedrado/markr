@@ -136,12 +136,21 @@ plane, and depth comes from typography and spacing rather than from stacked pane
 - structure carried by type and one hairline, not by boxes;
 - familiar interactions before clever ones.
 
-There are no panel frames. A single hairline column separates the sidebar from the reader, and
-heading level lives in a four-column gutter at the left of the measure — a tick in the margin — so
-the text column stays flush and free of prefix glyphs. Fenced code sits on a filled slab with a warm
+Nothing is painted behind the text. The terminal's own background shows through the shell, the
+sidebar and the reader, so transparent and blurred terminals keep their backdrop; fills are reserved
+for the few things that genuinely need to occlude — code slabs, inline-code chips, search matches and
+overlays. Pick the palette that matches your terminal: a light theme in a dark terminal now reads as
+dark text on a dark ground, because there is no longer a panel painted underneath it.
+
+There are no panel frames. A single hairline column separates the sidebar from the reader, and the
+measure is capped at eighty columns so prose stays near a comfortable reading length and gains real
+side margins on a wider terminal. Top-level headings close with a hairline rule the way they do on
+the web; sub-headings below them are marked by a tick in the four-column gutter at the left of the
+measure, so the text column stays flush and free of prefix glyphs. Fenced code sits on a filled slab with a warm
 bar instead of inside drawn line art, and tables get one rule under the header rather than a grid —
-their cells wrap rather than being cut short, and records gain a blank line between them as soon as
-any of them needs two lines. Wrapped source lines reflow into the measure, so paragraphs fill the
+their cells wrap rather than being cut short. A column is sized to its typical cell rather than its
+longest one, so a single long entry wraps instead of holding a channel of whitespace open beside
+every other row, and a hairline between records keeps a row trackable across the gap. Wrapped source lines reflow into the measure, so paragraphs fill the
 column instead of inheriting whatever width the file happened to be written at.
 A one-column reading rail at the right edge shows how far through the document you are and doubles as
 the reader's focus indicator; the sidebar's hairline does the same for the outline. Overlays — the

@@ -80,10 +80,9 @@ fn fill_area(frame: &mut Frame, area: Rect, background: Color) {
 }
 
 pub fn render(frame: &mut Frame, app: &App) {
-    frame.render_widget(
-        TuiBlock::default().style(Style::default().bg(app.theme.background)),
-        frame.area(),
-    );
+    // Nothing paints a background: the terminal's own ground shows through, so
+    // transparent and blurred terminals keep working. Fills are reserved for
+    // things that genuinely need to occlude — slabs, chips and overlays.
 
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -256,8 +255,8 @@ fn render_reader(frame: &mut Frame, app: &App, document_area: Rect) {
             }
         })
         .collect::<Vec<_>>();
-    let paragraph = Paragraph::new(Text::from(visible_lines))
-        .style(Style::default().fg(theme.text).bg(theme.reader_background));
+    let paragraph =
+        Paragraph::new(Text::from(visible_lines)).style(Style::default().fg(theme.text));
     frame.render_widget(paragraph, inner);
 
     let content_margin = app.document_layout.content_margin;
@@ -372,7 +371,6 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
                         line,
                         horizontal_scroll,
                         horizontal_scroll.saturating_add(visible_width),
-                        theme.reader_background,
                     )
                 })
                 .unwrap_or_else(|| {
@@ -392,8 +390,7 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
         .collect::<Vec<_>>();
 
     frame.render_widget(
-        Paragraph::new(Text::from(text))
-            .style(Style::default().fg(theme.text).bg(theme.reader_background)),
+        Paragraph::new(Text::from(text)).style(Style::default().fg(theme.text)),
         inner,
     );
 
@@ -422,18 +419,13 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
     frame.set_cursor_position(Position::new(x, y));
 }
 
-fn slice_spans_by_columns(
-    spans: &[Span<'static>],
-    start: usize,
-    end: usize,
-    background: Color,
-) -> Vec<Span<'static>> {
+fn slice_spans_by_columns(spans: &[Span<'static>], start: usize, end: usize) -> Vec<Span<'static>> {
     let mut result = Vec::new();
     let mut column: usize = 0;
 
     for span in spans {
         let mut segment = String::new();
-        let style = span.style.bg(background);
+        let style = span.style;
         for grapheme in span.content.graphemes(true) {
             let grapheme_start = column;
             let grapheme_end = column.saturating_add(grapheme.width());
@@ -462,8 +454,10 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     }
     let theme = app.theme;
     // Attached, the sidebar shares the reader's single plane. Overlaid it has to
-    // occlude, so it takes a fill of its own.
+    // occlude: clearing first drops the reader's glyphs, which a background fill
+    // on its own would leave showing through.
     if app.responsive_mode() != ResponsiveMode::Attached {
+        frame.render_widget(Clear, area);
         fill_area(frame, area, theme.surface);
     }
 
@@ -1091,7 +1085,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use ratatui::style::{Modifier, Style};
+    use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui_image::picker::{Picker, ProtocolType};
 
@@ -1235,11 +1229,15 @@ mod tests {
         // Row 1 is the breathing row between the header and the body.
         assert_eq!(buffer[(0, 1)].symbol(), " ");
 
-        // Sidebar and reader share the shell's ground; depth comes from type.
-        assert_eq!(theme.reader_background, theme.background);
-        assert_eq!(buffer[(0, 0)].bg, theme.background);
-        assert_eq!(buffer[(118, 10)].bg, theme.background);
-        assert_eq!(buffer[(5, 10)].bg, theme.background);
+        // Nothing paints a ground of its own, so a transparent or blurred
+        // terminal shows through the header, the sidebar and the reader alike.
+        for cell in [(0, 0), (118, 10), (5, 10), (60, 30)] {
+            assert_eq!(
+                buffer[cell].bg,
+                Color::Reset,
+                "the shell painted over the terminal at {cell:?}"
+            );
+        }
 
         // A single hairline column stands in for the sidebar's frame.
         assert_eq!(buffer[(29, 5)].symbol(), "│");
@@ -1324,6 +1322,42 @@ mod tests {
         assert_eq!(buffer[(1, 3)].fg, theme.accent);
         assert_eq!(buffer[(29, 5)].fg, theme.accent_soft);
         assert_eq!(buffer[(119, 2)].fg, theme.accent_soft);
+    }
+
+    #[test]
+    fn the_overlaid_sidebar_occludes_the_reader_instead_of_letting_it_through() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let workspace = Workspace::open(Some(path), true).expect("README workspace");
+        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
+        // Between 72 and 99 columns the sidebar is drawn over the reader.
+        app.update(Message::Resize {
+            width: 84,
+            height: 40,
+            at: Instant::now(),
+        });
+        assert_eq!(app.responsive_mode(), crate::app::ResponsiveMode::Overlay);
+
+        // Let the sidebar finish sliding in: while it animates it is narrower
+        // than its full width and the reader is meant to show beside it.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        let mut terminal = Terminal::new(TestBackend::new(84, 40)).expect("terminal");
+        terminal
+            .draw(|frame| super::render(frame, &app))
+            .expect("render overlay");
+
+        // Well below the outline's last entry, so anything here would be the
+        // reader's own text showing through a background-only fill.
+        let buffer = terminal.backend().buffer();
+        let beneath =
+            (0..app.sidebar_width().saturating_sub(1)).fold(String::new(), |mut text, x| {
+                text.push_str(buffer[(x, 34)].symbol());
+                text
+            });
+        assert!(
+            beneath.trim().is_empty(),
+            "the reader shows through the overlaid sidebar: {beneath:?}"
+        );
     }
 
     #[test]

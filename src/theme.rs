@@ -63,7 +63,7 @@ pub struct Theme {
     pub link: Color,
     pub border: Color,
     pub code: Color,
-    pub reader_background: Color,
+    /// The hairline that separates the sidebar, rules headings and tables.
     pub reader_border: Color,
     pub chrome_text: Color,
     pub chrome_muted: Color,
@@ -94,15 +94,14 @@ impl Theme {
                 text_muted: Color::Rgb(139, 129, 117),
                 accent: Color::Rgb(242, 125, 38),
                 link: Color::Rgb(127, 180, 201),
-                border: Color::Rgb(74, 68, 61),
+                border: Color::Rgb(107, 99, 89),
                 code: Color::Rgb(217, 178, 106),
-                reader_background: Color::Rgb(11, 10, 9),
-                reader_border: Color::Rgb(43, 38, 34),
+                reader_border: Color::Rgb(61, 55, 47),
                 chrome_text: Color::Rgb(233, 227, 217),
                 chrome_muted: Color::Rgb(139, 129, 117),
                 selection: Color::Rgb(43, 38, 34),
                 accent_soft: Color::Rgb(138, 84, 36),
-                marker: Color::Rgb(165, 101, 44),
+                marker: Color::Rgb(199, 124, 56),
                 error: Color::Rgb(224, 96, 63),
                 warning: Color::Rgb(217, 164, 65),
                 success: Color::Rgb(127, 174, 127),
@@ -116,15 +115,14 @@ impl Theme {
                 text_muted: Color::Rgb(125, 141, 163),
                 accent: Color::Rgb(242, 125, 38),
                 link: Color::Rgb(114, 180, 255),
-                border: Color::Rgb(68, 86, 109),
+                border: Color::Rgb(97, 117, 143),
                 code: Color::Rgb(222, 180, 110),
-                reader_background: Color::Rgb(8, 13, 21),
-                reader_border: Color::Rgb(34, 48, 63),
+                reader_border: Color::Rgb(51, 68, 90),
                 chrome_text: Color::Rgb(221, 229, 239),
                 chrome_muted: Color::Rgb(125, 141, 163),
                 selection: Color::Rgb(34, 48, 63),
                 accent_soft: Color::Rgb(122, 74, 31),
-                marker: Color::Rgb(165, 101, 44),
+                marker: Color::Rgb(199, 124, 56),
                 error: Color::Rgb(224, 96, 63),
                 warning: Color::Rgb(217, 164, 65),
                 success: Color::Rgb(127, 174, 127),
@@ -140,13 +138,12 @@ impl Theme {
                 link: Color::Rgb(47, 111, 143),
                 border: Color::Rgb(140, 132, 117),
                 code: Color::Rgb(138, 90, 30),
-                reader_background: Color::Rgb(248, 245, 238),
-                reader_border: Color::Rgb(207, 198, 180),
+                reader_border: Color::Rgb(194, 184, 163),
                 chrome_text: Color::Rgb(35, 32, 28),
                 chrome_muted: Color::Rgb(107, 100, 89),
                 selection: Color::Rgb(224, 215, 196),
                 accent_soft: Color::Rgb(217, 154, 94),
-                marker: Color::Rgb(184, 114, 44),
+                marker: Color::Rgb(166, 96, 28),
                 error: Color::Rgb(169, 45, 38),
                 warning: Color::Rgb(154, 106, 18),
                 success: Color::Rgb(63, 122, 79),
@@ -160,7 +157,8 @@ impl Theme {
 
     pub const fn syntax_theme(self) -> &'static str {
         match self.name {
-            ThemeName::Markr | ThemeName::Midnight => "base16-ocean.dark",
+            // Ocean is handsome but desaturated; on a warm slab it washes out.
+            ThemeName::Markr | ThemeName::Midnight => "base16-eighties.dark",
             ThemeName::Paper => "InspiredGitHub",
         }
     }
@@ -207,13 +205,27 @@ mod tests {
     }
 
     #[test]
-    fn reads_on_a_single_plane_in_every_palette() {
+    fn keeps_the_dimmest_tones_off_the_background() {
+        // Nothing is painted behind the text, so a user's transparent or
+        // blurred terminal shows through. The quietest tones still have to
+        // separate from the palette's own ground by a visible margin.
         for name in ThemeName::ALL {
             let theme = Theme::new(name);
-            assert_eq!(
-                theme.reader_background, theme.background,
-                "{name} splits the reader onto a second plane"
-            );
+            for (label, color) in [
+                ("border", theme.border),
+                ("reader_border", theme.reader_border),
+            ] {
+                let (Color::Rgb(r, g, b), Color::Rgb(br, bg, bb)) = (color, theme.background)
+                else {
+                    panic!("{name} uses a non-RGB {label}");
+                };
+                let distance =
+                    r.abs_diff(br) as u32 + g.abs_diff(bg) as u32 + b.abs_diff(bb) as u32;
+                assert!(
+                    distance > 60,
+                    "{name}'s {label} is too close to its own ground to read"
+                );
+            }
         }
     }
 }
