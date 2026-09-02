@@ -260,9 +260,7 @@ fn render_reader(frame: &mut Frame, app: &App, document_area: Rect) {
     frame.render_widget(paragraph, inner);
 
     let content_margin = app.document_layout.content_margin;
-    let content_width = usize::from(inner.width)
-        .saturating_sub(layout::GUTTER_WIDTH.saturating_add(layout::RIGHT_PAD))
-        .min(layout::MAX_CONTENT_WIDTH);
+    let content_width = layout::measure_for(inner.width);
     let image_regions: Vec<(String, usize)> = app
         .document_layout
         .image_regions
