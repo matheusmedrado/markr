@@ -152,7 +152,9 @@ measure, so the text column stays flush and free of prefix glyphs. Fenced code s
 bar instead of inside drawn line art, and tables get one rule under the header rather than a grid —
 their cells wrap rather than being cut short. A column is sized to its typical cell rather than its
 longest one, so a single long entry wraps instead of holding a channel of whitespace open beside
-every other row, and a hairline between records keeps a row trackable across the gap. Wrapped source lines reflow into the measure, so paragraphs fill the
+every other row, and a hairline between records keeps a row trackable across the gap. A table is
+sized by its content, so it is centred in the measure rather than left against the margin with the
+rest of the line empty beside it. Wrapped source lines reflow into the measure, so paragraphs fill the
 column instead of inheriting whatever width the file happened to be written at.
 A one-column reading rail at the right edge shows how far through the document you are and doubles as
 the reader's focus indicator; the sidebar's hairline does the same for the outline. Overlays — the
