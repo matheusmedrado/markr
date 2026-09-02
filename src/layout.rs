@@ -525,23 +525,36 @@ fn render_table(
         ))
     };
 
+    let mut table = Vec::new();
     if !headers.is_empty() {
-        lines.extend(table_row(
+        table.extend(table_row(
             &table_rows[0],
             &widths,
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ));
-        lines.push(rule(theme.border));
+        table.push(rule(theme.border));
     }
     // Every record is separated by a hairline. Whitespace alone is not enough
     // to track a row across a wide column gap, and it fails outright once a
     // cell wraps onto a second line.
     for (index, record) in body.into_iter().enumerate() {
         if index > 0 {
-            lines.push(rule(theme.reader_border));
+            table.push(rule(theme.reader_border));
         }
-        lines.extend(record);
+        table.extend(record);
     }
+
+    // A table is sized by its content, so on a wide measure it would otherwise
+    // sit against the left margin with the rest of the line empty beside it.
+    // Centring it balances that space without stretching the columns apart.
+    let indent = max_width.saturating_sub(ruled_width) / 2;
+    if indent > 0 {
+        let padding = " ".repeat(indent);
+        for line in &mut table {
+            line.spans.insert(0, Span::raw(padding.clone()));
+        }
+    }
+    lines.extend(table);
 }
 
 fn table_cell_text(cell: &[Inline]) -> String {
@@ -899,6 +912,33 @@ mod tests {
     }
 
     #[test]
+    fn centres_a_table_narrower_than_the_measure() {
+        // Two three-column cells and one gap: nine columns of table inside a
+        // sixty column measure, so twenty-five of indent on each side.
+        let document = Document::parse("| A | B |\n| --- | --- |\n| one | two |");
+        let layout = build(
+            &document,
+            reader_width(60),
+            Theme::default(),
+            &ImageStore::default(),
+        );
+
+        for needle in ["A", "one", "─"] {
+            let line = layout
+                .lines
+                .iter()
+                .map(|line| measure_of(line, layout.content_margin))
+                .find(|text| text.trim_start().starts_with(needle))
+                .unwrap_or_else(|| panic!("a table line starting with {needle:?}"));
+            assert_eq!(
+                line.len() - line.trim_start().len(),
+                25,
+                "{needle:?} is not centred: {line:?}"
+            );
+        }
+    }
+
+    #[test]
     fn separates_table_columns_with_space_rather_than_rules() {
         let document = Document::parse("| Name | Value |\n| --- | --- |\n| MarkR | reader |");
         let layout = build(
@@ -909,8 +949,16 @@ mod tests {
         );
         let lines = measures(&layout);
 
-        assert!(lines.iter().any(|line| line.starts_with("Name")));
-        assert!(lines.iter().any(|line| line.starts_with("MarkR")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.trim_start().starts_with("Name"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.trim_start().starts_with("MarkR"))
+        );
         assert!(
             lines
                 .iter()
@@ -1058,6 +1106,7 @@ mod tests {
             .iter()
             .filter(|line| {
                 let text = measure_of(line, layout.content_margin);
+                let text = text.trim();
                 !text.is_empty() && text.chars().all(|character| character == '─')
             })
             .collect::<Vec<_>>();
@@ -1077,7 +1126,11 @@ mod tests {
         let header = layout
             .lines
             .iter()
-            .find(|line| measure_of(line, layout.content_margin).starts_with("Name"))
+            .find(|line| {
+                measure_of(line, layout.content_margin)
+                    .trim_start()
+                    .starts_with("Name")
+            })
             .expect("the header row");
         assert!(
             header
