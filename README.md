@@ -113,7 +113,7 @@ When a directory is provided, MarkR recursively discovers files with the `.md`, 
 | `Ctrl-S` in the editor | Save edits and refresh the rendered document |
 | `Ctrl-Z` / `Ctrl-Y` in the editor | Undo / redo the last edit |
 | `Esc` in the editor | Return to the reader; confirm when edits are unsaved |
-| `q` / `Ctrl-C` in the editor | Quit; confirm when edits are unsaved |
+| `Ctrl-C` in the editor | Quit; confirm when edits are unsaved |
 | `s` / `d` at the unsaved prompt | Save / discard changes |
 | `o` / `r` at the file-change prompt | Overwrite / reload the file |
 | `v` | Start a keyboard selection in the reader |
