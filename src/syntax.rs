@@ -7,7 +7,7 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
-use crate::theme::Theme as MarkrTheme;
+use crate::theme::{Theme as MarkrTheme, ThemeName};
 
 struct HighlighterAssets {
     syntax_set: SyntaxSet,
@@ -55,6 +55,52 @@ pub fn highlight(language: Option<&str>, code: &str, theme: MarkrTheme) -> Vec<V
         .collect()
 }
 
+/// The editor's Markdown highlighting, held between frames.
+///
+/// Highlighting is a whole-document job — syntect carries parser state from
+/// one line to the next — so the editor used to pay for the entire file on
+/// every draw, including the draws where nothing had changed. The cache keeps
+/// the result until the text or the palette actually moves, which turns a
+/// per-frame cost into a per-keystroke one.
+#[derive(Debug, Default)]
+pub struct HighlightCache {
+    /// The buffer revision and palette the held lines were built from.
+    built_from: Option<(u64, ThemeName)>,
+    lines: Vec<Vec<Span<'static>>>,
+}
+
+impl HighlightCache {
+    /// Whether the held lines still describe `revision` under `theme`.
+    pub fn is_current(&self, revision: u64, theme: ThemeName) -> bool {
+        self.built_from == Some((revision, theme))
+    }
+
+    /// Re-highlights `text`, which is expected to be revision `revision` of
+    /// the editor buffer. Callers should check [`Self::is_current`] first.
+    pub fn rebuild(&mut self, revision: u64, theme: MarkrTheme, text: &str) {
+        self.lines = highlight(Some("markdown"), text, theme);
+
+        // `LinesWithEndings` yields nothing after a trailing newline, but the
+        // buffer still has an empty line there. Pad so an index into these
+        // lines is an index into the buffer.
+        if text.is_empty() || text.ends_with('\n') {
+            self.lines.push(Vec::new());
+        }
+
+        self.built_from = Some((revision, theme.name));
+    }
+
+    /// One entry per line of the buffer it was built from.
+    pub fn lines(&self) -> &[Vec<Span<'static>>] {
+        &self.lines
+    }
+
+    pub fn clear(&mut self) {
+        self.built_from = None;
+        self.lines = Vec::new();
+    }
+}
+
 fn load_assets() -> HighlighterAssets {
     let syntax_set = SyntaxSet::load_defaults_newlines();
     let theme_set = ThemeSet::load_defaults();
@@ -76,8 +122,45 @@ fn find_syntax<'a>(language: Option<&str>, syntax_set: &'a SyntaxSet) -> &'a Syn
 
 #[cfg(test)]
 mod tests {
-    use super::highlight;
+    use super::{HighlightCache, highlight};
     use crate::theme::{Theme, ThemeName};
+
+    #[test]
+    fn holds_highlighting_until_the_revision_or_palette_moves() {
+        let mut cache = HighlightCache::default();
+        assert!(!cache.is_current(1, ThemeName::Markr));
+
+        cache.rebuild(1, Theme::default(), "# Title\n");
+        assert!(cache.is_current(1, ThemeName::Markr));
+        // A later edit, and the same text under another palette, both miss.
+        assert!(!cache.is_current(2, ThemeName::Markr));
+        assert!(!cache.is_current(1, ThemeName::Paper));
+    }
+
+    #[test]
+    fn keeps_one_entry_per_buffer_line_including_a_trailing_empty_one() {
+        let mut cache = HighlightCache::default();
+
+        // "a\n" is two buffer lines: "a" and the empty one after it.
+        cache.rebuild(1, Theme::default(), "a\n");
+        assert_eq!(cache.lines().len(), 2);
+
+        cache.rebuild(2, Theme::default(), "a\nb");
+        assert_eq!(cache.lines().len(), 2);
+
+        cache.rebuild(3, Theme::default(), "");
+        assert_eq!(cache.lines().len(), 1);
+    }
+
+    #[test]
+    fn clearing_drops_the_held_lines() {
+        let mut cache = HighlightCache::default();
+        cache.rebuild(1, Theme::default(), "# Title\n");
+        cache.clear();
+
+        assert!(cache.lines().is_empty());
+        assert!(!cache.is_current(1, ThemeName::Markr));
+    }
 
     #[test]
     fn highlights_known_languages() {
