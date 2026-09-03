@@ -15,6 +15,7 @@ use crate::selection::{CursorPosition, Selection};
 use crate::syntax;
 use crate::theme::{Theme, ThemeName};
 use crate::workspace::Workspace;
+use crate::wrap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
@@ -135,8 +136,14 @@ pub struct App {
     /// The editor's Markdown highlighting, rebuilt when the buffer or the
     /// palette moves rather than on every draw.
     editor_highlight: syntax::HighlightCache,
+    /// Where each source line falls once wrapped to the editor's width.
+    editor_wrap: wrap::WrapLayout,
+    /// The first visual row on screen. Rows, not source lines: a wrapped line
+    /// can be scrolled into partway.
     pub editor_scroll: usize,
-    pub editor_horizontal_scroll: usize,
+    /// The cell the cursor aims for while travelling up and down, so passing
+    /// through a short row does not drag it permanently to the left.
+    editor_goal_column: Option<usize>,
     pub unsaved_action: Option<UnsavedAction>,
     pub external_change_detected: bool,
     external_prompt: Option<ExternalPromptAction>,
@@ -174,7 +181,6 @@ struct UiSnapshot {
     editor_text: Option<String>,
     editor_cursor: Option<CursorPosition>,
     editor_scroll: usize,
-    editor_horizontal_scroll: usize,
     editor_dirty: bool,
     unsaved_action: Option<UnsavedAction>,
     external_change_detected: bool,
@@ -250,8 +256,9 @@ impl App {
             error: None,
             editor: None,
             editor_highlight: syntax::HighlightCache::default(),
+            editor_wrap: wrap::WrapLayout::default(),
             editor_scroll: 0,
-            editor_horizontal_scroll: 0,
+            editor_goal_column: None,
             unsaved_action: None,
             external_change_detected: false,
             external_prompt: None,
@@ -294,15 +301,14 @@ impl App {
         self.editor.as_ref().map(EditorBuffer::cursor)
     }
 
-    pub fn editor_cursor_display_column(&self) -> Option<usize> {
-        self.editor
-            .as_ref()
-            .map(EditorBuffer::cursor_display_column)
-    }
-
     /// The highlighted form of [`Self::editor_lines`], one entry per line.
     pub fn editor_highlight(&self) -> &[Vec<ratatui::text::Span<'static>>] {
         self.editor_highlight.lines()
+    }
+
+    /// Where each source line falls on screen once wrapped.
+    pub fn editor_wrap(&self) -> &wrap::WrapLayout {
+        &self.editor_wrap
     }
 
     pub fn editor_dirty(&self) -> bool {
@@ -321,9 +327,16 @@ impl App {
         self.editor.as_ref().map(EditorBuffer::text)
     }
 
+    /// The columns left for text once the line-number gutter is taken out.
+    /// The gutter is `"  N │ "`: two spaces, the number, then three more.
     pub fn editor_content_width(&self) -> usize {
-        let line_number_width = self.editor_lines().len().max(1).to_string().len();
-        usize::from(self.document_width()).saturating_sub(line_number_width + 3)
+        usize::from(self.document_width())
+            .saturating_sub(self.editor_gutter_width())
+            .max(1)
+    }
+
+    pub fn editor_gutter_width(&self) -> usize {
+        self.editor_lines().len().max(1).to_string().len() + 5
     }
 
     pub fn document_width(&self) -> u16 {
@@ -499,25 +512,107 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> bool {
+        let cursor_before = self.editor_cursor();
         let changed = self.apply(message);
-        self.sync_editor_highlight();
+
+        // The wrap has to be rebuilt before the viewport is settled against
+        // it, or an edit that moved where the lines break would be chased
+        // with a scroll computed from where they used to.
+        let rewrapped = self.sync_editor_view();
+
+        // Only follow the cursor when the cursor or the wrapping actually
+        // moved. The wheel deliberately leaves the cursor behind, and
+        // dragging the view back to it would make the editor impossible to
+        // look around in.
+        if rewrapped || self.editor_cursor() != cursor_before {
+            self.ensure_editor_cursor_visible();
+        }
         changed
     }
 
-    /// Rebuilds the editor highlighting if the buffer or the palette has
-    /// moved since it was last built. Cheap enough to call after every
-    /// message: the common case is one comparison.
-    fn sync_editor_highlight(&mut self) {
+    /// Rebuilds the editor's highlighting and wrapping if the buffer, the
+    /// palette or the width has moved since they were last built. Cheap
+    /// enough to call after every message: the common case is two
+    /// comparisons.
+    ///
+    /// Returns whether the wrapping was rebuilt, which is what tells the
+    /// caller the viewport may need settling against it again.
+    fn sync_editor_view(&mut self) -> bool {
         let Some(revision) = self.editor.as_ref().map(EditorBuffer::revision) else {
             self.editor_highlight.clear();
-            return;
+            self.editor_wrap.clear();
+            return false;
         };
-        if self.editor_highlight.is_current(revision, self.theme.name) {
-            return;
-        }
-        if let Some(text) = self.editor_text() {
+
+        if !self.editor_highlight.is_current(revision, self.theme.name)
+            && let Some(text) = self.editor_text()
+        {
             self.editor_highlight.rebuild(revision, self.theme, &text);
         }
+
+        let width = self.editor_content_width();
+        if self.editor_wrap.is_current(revision, width) {
+            return false;
+        }
+        if let Some(editor) = self.editor.as_ref() {
+            self.editor_wrap.rebuild(revision, width, editor.lines());
+            return true;
+        }
+        false
+    }
+
+    /// Moves the cursor `rows` visual rows, keeping the cell it is aiming for
+    /// so a short row passed through on the way does not capture it.
+    fn editor_move_rows(&mut self, rows: isize) {
+        let Some(editor) = self.editor.as_ref() else {
+            return;
+        };
+        if self.editor_wrap.is_empty() {
+            return;
+        }
+
+        let lines = editor.lines();
+        let (row, column) = self.editor_wrap.locate(editor.cursor(), lines);
+        let goal = self.editor_goal_column.unwrap_or(column);
+        let last = self.editor_wrap.len().saturating_sub(1);
+        let target = if rows < 0 {
+            row.saturating_sub(rows.unsigned_abs())
+        } else {
+            row.saturating_add(rows as usize).min(last)
+        };
+        let position = self.editor_wrap.position_at(target, goal, lines);
+
+        if let Some(editor) = self.editor.as_mut() {
+            editor.set_cursor(position);
+        }
+        // `set_cursor` cannot know this was a vertical move, so the aim is
+        // restored after it rather than before.
+        self.editor_goal_column = Some(goal);
+    }
+
+    /// Moves the cursor to the start or the end of the visual row it is on.
+    fn editor_move_to_row_edge(&mut self, to_end: bool) {
+        let Some(editor) = self.editor.as_ref() else {
+            return;
+        };
+        let lines = editor.lines();
+        let (index, _) = self.editor_wrap.locate(editor.cursor(), lines);
+        let Some(row) = self.editor_wrap.rows().get(index).copied() else {
+            return;
+        };
+
+        let column = if !to_end {
+            row.start
+        } else if self.editor_wrap.ends_line(index) {
+            row.end
+        } else {
+            // A wrapped row breaks after a space. Landing on that space would
+            // put the caret at the start of the next row, so the end of this
+            // row is the last thing actually printed on it.
+            self.editor_wrap.last_printed_column(index, lines)
+        };
+
+        self.set_editor_cursor(CursorPosition::new(row.line, column));
     }
 
     fn apply(&mut self, message: Message) -> bool {
@@ -586,7 +681,6 @@ impl App {
             editor_text: self.editor.as_ref().map(EditorBuffer::text),
             editor_cursor: self.editor_cursor(),
             editor_scroll: self.editor_scroll,
-            editor_horizontal_scroll: self.editor_horizontal_scroll,
             editor_dirty: self.editor_dirty(),
             unsaved_action: self.unsaved_action,
             external_change_detected: self.external_change_detected,
@@ -748,6 +842,18 @@ impl App {
             return;
         }
 
+        // Anything but travelling up and down gives up the cell the cursor
+        // was aiming for, so the next vertical move starts from where it
+        // actually is.
+        let vertical = matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+        ) || (key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('d')));
+        if !vertical {
+            self.editor_goal_column = None;
+        }
+
         let page_amount = self.document_height().saturating_sub(1).max(1);
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
@@ -762,21 +868,11 @@ impl App {
                     return;
                 }
                 KeyCode::Char('u') => {
-                    self.editor_move(|editor| {
-                        for _ in 0..page_amount {
-                            editor.move_up();
-                        }
-                    });
-                    self.ensure_editor_cursor_visible();
+                    self.editor_move_rows(-(page_amount as isize));
                     return;
                 }
                 KeyCode::Char('d') => {
-                    self.editor_move(|editor| {
-                        for _ in 0..page_amount {
-                            editor.move_down();
-                        }
-                    });
-                    self.ensure_editor_cursor_visible();
+                    self.editor_move_rows(page_amount as isize);
                     return;
                 }
                 _ => {}
@@ -788,20 +884,15 @@ impl App {
             KeyCode::Esc => self.request_cancel_editor(at),
             KeyCode::Left => self.editor_move(|editor| editor.move_left()),
             KeyCode::Right => self.editor_move(|editor| editor.move_right()),
-            KeyCode::Up => self.editor_move(|editor| editor.move_up()),
-            KeyCode::Down => self.editor_move(|editor| editor.move_down()),
-            KeyCode::Home => self.editor_move(|editor| editor.move_home()),
-            KeyCode::End => self.editor_move(|editor| editor.move_end()),
-            KeyCode::PageUp => self.editor_move(|editor| {
-                for _ in 0..page_amount {
-                    editor.move_up();
-                }
-            }),
-            KeyCode::PageDown => self.editor_move(|editor| {
-                for _ in 0..page_amount {
-                    editor.move_down();
-                }
-            }),
+            // Up and down travel by what is on screen, not by what is in the
+            // file: a wrapped line is several rows, and skipping all of them
+            // at once would make a long paragraph impossible to move through.
+            KeyCode::Up => self.editor_move_rows(-1),
+            KeyCode::Down => self.editor_move_rows(1),
+            KeyCode::Home => self.editor_move_to_row_edge(false),
+            KeyCode::End => self.editor_move_to_row_edge(true),
+            KeyCode::PageUp => self.editor_move_rows(-(page_amount as isize)),
+            KeyCode::PageDown => self.editor_move_rows(page_amount as isize),
             KeyCode::Backspace => self.editor_move(|editor| editor.backspace()),
             KeyCode::Delete => self.editor_move(|editor| editor.delete()),
             KeyCode::Enter => self.editor_move(|editor| editor.insert('\n')),
@@ -921,7 +1012,7 @@ impl App {
     fn discard_editor(&mut self, at: Instant, action: UnsavedAction) {
         self.editor = None;
         self.editor_scroll = 0;
-        self.editor_horizontal_scroll = 0;
+        self.editor_goal_column = None;
         self.load_active_file();
         match action {
             UnsavedAction::CancelEdit => self.set_message("changes discarded", at),
@@ -935,24 +1026,24 @@ impl App {
         }
     }
 
+    /// Brings the cursor's visual row on screen, and keeps the viewport from
+    /// scrolling past the end of a wrapped document.
     fn ensure_editor_cursor_visible(&mut self) {
-        let Some(cursor) = self.editor_cursor() else {
+        let Some(editor) = self.editor.as_ref() else {
             self.editor_scroll = 0;
             return;
         };
+
+        let (row, _) = self.editor_wrap.locate(editor.cursor(), editor.lines());
         let height = self.document_height().max(1);
-        if cursor.line < self.editor_scroll {
-            self.editor_scroll = cursor.line;
-        } else if cursor.line >= self.editor_scroll.saturating_add(height) {
-            self.editor_scroll = cursor.line.saturating_sub(height.saturating_sub(1));
+        let last_top = self.editor_wrap.len().saturating_sub(height);
+
+        if row < self.editor_scroll {
+            self.editor_scroll = row;
+        } else if row >= self.editor_scroll.saturating_add(height) {
+            self.editor_scroll = row.saturating_sub(height.saturating_sub(1));
         }
-        let width = self.editor_content_width().max(1);
-        let column = self.editor_cursor_display_column().unwrap_or_default();
-        if column < self.editor_horizontal_scroll {
-            self.editor_horizontal_scroll = column;
-        } else if column >= self.editor_horizontal_scroll.saturating_add(width) {
-            self.editor_horizontal_scroll = column.saturating_sub(width.saturating_sub(1));
-        }
+        self.editor_scroll = self.editor_scroll.min(last_top);
     }
 
     fn enter_editor(&mut self, at: Instant) {
@@ -965,7 +1056,7 @@ impl App {
             Ok(content) => {
                 self.editor = Some(EditorBuffer::from_text(&content));
                 self.editor_scroll = 0;
-                self.editor_horizontal_scroll = 0;
+                self.editor_goal_column = None;
                 self.last_modified = modified_time(self.workspace.active_path());
                 self.external_change_detected = false;
                 self.clear_selection();
@@ -1007,7 +1098,7 @@ impl App {
     fn cancel_editor(&mut self, at: Instant) {
         self.editor = None;
         self.editor_scroll = 0;
-        self.editor_horizontal_scroll = 0;
+        self.editor_goal_column = None;
         self.load_active_file();
         self.set_message("edit cancelled", at);
     }
@@ -1017,7 +1108,7 @@ impl App {
             Ok(content) => {
                 self.editor = Some(EditorBuffer::from_text(&content));
                 self.editor_scroll = 0;
-                self.editor_horizontal_scroll = 0;
+                self.editor_goal_column = None;
                 self.apply_document_content(&content);
                 self.external_change_detected = false;
                 true
@@ -1176,6 +1267,7 @@ impl App {
     }
 
     fn set_editor_cursor(&mut self, position: CursorPosition) {
+        self.editor_goal_column = None;
         if let Some(editor) = self.editor.as_mut() {
             editor.set_cursor(position);
             self.ensure_editor_cursor_visible();
@@ -1190,23 +1282,20 @@ impl App {
         let document_area = self.reader_outer_area();
         let inner = layout::editor_inner(document_area);
         let (inner_x, inner_y) = (inner.x, inner.y);
-        let line = self
+        let row = self
             .editor_scroll
             .saturating_add(usize::from(screen_y.saturating_sub(inner_y)));
-        if line >= self.editor_lines().len() {
+        if row >= self.editor_wrap.len() {
             return None;
         }
 
-        let line_number_width = self.editor_lines().len().max(1).to_string().len();
-        let text_start = inner_x.saturating_add(line_number_width as u16 + 5);
-        let display_column = self
-            .editor_horizontal_scroll
-            .saturating_add(usize::from(screen_x.saturating_sub(text_start)));
-        let column = self
-            .editor
-            .as_ref()?
-            .cursor_column_at_display_width(line, display_column)?;
-        Some(CursorPosition::new(line, column))
+        let text_start = inner_x.saturating_add(self.editor_gutter_width() as u16);
+        let display_column = usize::from(screen_x.saturating_sub(text_start));
+        let editor = self.editor.as_ref()?;
+        Some(
+            self.editor_wrap
+                .position_at(row, display_column, editor.lines()),
+        )
     }
 
     fn mouse_is_over_reader(&self, screen_x: u16, screen_y: u16) -> bool {
@@ -1523,8 +1612,9 @@ impl App {
     }
 
     fn editor_scroll_down(&mut self) {
+        // Rows, not lines: a wrapped document is taller than its line count.
         let max_scroll = self
-            .editor_lines()
+            .editor_wrap
             .len()
             .saturating_sub(self.document_height());
         self.editor_scroll = self.editor_scroll.saturating_add(1).min(max_scroll);
@@ -1676,7 +1766,7 @@ impl App {
     fn load_active_file(&mut self) {
         self.editor = None;
         self.editor_scroll = 0;
-        self.editor_horizontal_scroll = 0;
+        self.editor_goal_column = None;
         self.external_change_detected = false;
         self.external_prompt = None;
         match self.workspace.reload_content() {
@@ -2053,6 +2143,160 @@ mod tests {
         assert_eq!(app.editor_text().as_deref(), Some("# One!"));
         assert!(app.editor_dirty());
         fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    /// An editor open on one paragraph long enough to wrap several times,
+    /// followed by a line with a single character to fall onto.
+    fn wrapped_document() -> (PathBuf, App) {
+        static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("markr-wrap-{}-{id}.md", std::process::id()));
+        let long = ["alpha"; 40].join(" ");
+        fs::write(&path, format!("{long}\ne")).expect("wrap fixture");
+        let workspace = Workspace::open(Some(path.clone()), true).expect("workspace");
+        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
+        app.update(Message::Resize {
+            width: 120,
+            height: 20,
+            at: Instant::now(),
+        });
+        app.update(key(KeyCode::Char('e')));
+        (path, app)
+    }
+
+    /// The cursor's visual row, and how far across it sits in cells.
+    fn cursor_cell(app: &App) -> (usize, usize) {
+        app.editor_wrap()
+            .locate(app.editor_cursor().expect("cursor"), app.editor_lines())
+    }
+
+    #[test]
+    fn a_long_line_takes_several_rows_instead_of_scrolling_sideways() {
+        let (path, app) = wrapped_document();
+
+        assert_eq!(app.editor_lines().len(), 2, "two source lines");
+        assert!(
+            app.editor_wrap().len() > 3,
+            "but several rows once wrapped: {}",
+            app.editor_wrap().len()
+        );
+
+        fs::remove_file(path).expect("remove wrap fixture");
+    }
+
+    #[test]
+    fn down_travels_one_visual_row_not_one_source_line() {
+        let (path, mut app) = wrapped_document();
+        assert_eq!(cursor_cell(&app), (0, 0));
+
+        app.update(key(KeyCode::Down));
+
+        assert_eq!(cursor_cell(&app).0, 1, "one row down");
+        assert_eq!(
+            app.editor_cursor().expect("cursor").line,
+            0,
+            "still inside the first source line, which is the whole point"
+        );
+
+        fs::remove_file(path).expect("remove wrap fixture");
+    }
+
+    #[test]
+    fn the_cursor_keeps_the_cell_it_was_aiming_for_across_a_short_row() {
+        let (path, mut app) = wrapped_document();
+
+        for _ in 0..5 {
+            app.update(key(KeyCode::Right));
+        }
+        let aim = cursor_cell(&app).1;
+        assert_eq!(aim, 5);
+
+        // Fall onto the one-character last line. It cannot hold the aim.
+        while app.editor_cursor().expect("cursor").line == 0 {
+            app.update(key(KeyCode::Down));
+        }
+        assert_eq!(cursor_cell(&app).1, 1, "clamped to the short line's end");
+
+        // Coming back up, the aim is restored rather than lost to that line.
+        app.update(key(KeyCode::Up));
+
+        assert_eq!(
+            cursor_cell(&app).1,
+            aim,
+            "the cell the cursor was aiming for survived the short line"
+        );
+
+        fs::remove_file(path).expect("remove wrap fixture");
+    }
+
+    #[test]
+    fn a_sideways_move_gives_up_the_aim() {
+        let (path, mut app) = wrapped_document();
+
+        for _ in 0..5 {
+            app.update(key(KeyCode::Right));
+        }
+        while app.editor_cursor().expect("cursor").line == 0 {
+            app.update(key(KeyCode::Down));
+        }
+        // Moving by hand on the short line replaces the aim with where the
+        // cursor actually is, so going back up does not jump to cell five.
+        app.update(key(KeyCode::Left));
+        app.update(key(KeyCode::Up));
+
+        assert_eq!(cursor_cell(&app).1, 0);
+
+        fs::remove_file(path).expect("remove wrap fixture");
+    }
+
+    #[test]
+    fn home_and_end_work_on_the_visual_row() {
+        let (path, mut app) = wrapped_document();
+
+        app.update(key(KeyCode::Down));
+        assert_eq!(cursor_cell(&app), (1, 0));
+
+        app.update(key(KeyCode::End));
+        let (row, cell) = cursor_cell(&app);
+        assert_eq!(row, 1, "End stayed on the row it started on");
+        assert!(cell > 0);
+        assert!(
+            app.editor_cursor().expect("cursor").column < app.editor_lines()[0].chars().count(),
+            "End stopped at the end of the row, not the end of the source line"
+        );
+
+        app.update(key(KeyCode::Home));
+
+        assert_eq!(
+            cursor_cell(&app),
+            (1, 0),
+            "Home returned to the row's start"
+        );
+
+        fs::remove_file(path).expect("remove wrap fixture");
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_editor_without_dragging_the_cursor_along() {
+        let mut app = readme_app();
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+        app.update(key(KeyCode::Char('e')));
+        let cursor = app.editor_cursor().expect("cursor");
+
+        let mut clock = Instant::now();
+        app.update(mouse(MouseEventKind::ScrollDown, 35, 3));
+        drain_scroll(&mut app, &mut clock);
+
+        assert!(app.editor_scroll > 0, "the viewport moved");
+        assert_eq!(
+            app.editor_cursor().expect("cursor"),
+            cursor,
+            "but looking around left the caret where it was"
+        );
     }
 
     #[test]

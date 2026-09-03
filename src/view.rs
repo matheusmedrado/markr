@@ -349,48 +349,68 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
     let lines = app.editor_lines();
     let cursor = app.editor_cursor();
     let highlighted_lines = app.editor_highlight();
+    let wrap = app.editor_wrap();
     let line_number_width = lines.len().max(1).to_string().len();
-    let prefix_width = line_number_width.saturating_add(5);
-    let visible_width = app.editor_content_width();
-    let horizontal_scroll = app.editor_horizontal_scroll;
-    let start = app.editor_scroll.min(lines.len());
-    let visible_lines = lines.iter().skip(start).take(usize::from(inner.height));
-    let text = visible_lines
+    let gutter_width = app.editor_gutter_width();
+
+    // Which visual row the caret is on, so its line keeps the lit number and
+    // the caret itself can be placed without locating it a second time.
+    let caret = cursor.map(|cursor| wrap.locate(cursor, lines));
+    let start = app.editor_scroll.min(wrap.len());
+
+    let text = wrap
+        .rows()
+        .iter()
         .enumerate()
-        .map(|(line_index, line)| {
-            let absolute_line = start + line_index;
-            let is_cursor_line = cursor.is_some_and(|cursor| cursor.line == absolute_line);
-            let line_number_style = if is_cursor_line {
+        .skip(start)
+        .take(usize::from(inner.height))
+        .map(|(index, row)| {
+            let on_caret_line = caret.is_some_and(|(caret_row, _)| {
+                wrap.rows()
+                    .get(caret_row)
+                    .is_some_and(|caret| caret.line == row.line)
+            });
+            let number_style = if on_caret_line {
                 theme.accent()
             } else {
                 theme.muted()
             };
-            let prefix = format!(
-                "  {:>line_number_width$} │ ",
-                absolute_line + 1,
-                line_number_width = line_number_width
-            );
+
+            // Only the row that opens a source line carries its number; the
+            // rows it wraps onto leave the gutter blank so the column of
+            // numbers still reads as one number per line of the file.
+            let prefix = if row.opens_line() {
+                format!(
+                    "  {:>line_number_width$} │ ",
+                    row.line + 1,
+                    line_number_width = line_number_width
+                )
+            } else {
+                format!(
+                    "  {:>line_number_width$}   ",
+                    "",
+                    line_number_width = line_number_width
+                )
+            };
+
+            let line = lines.get(row.line);
+            let (from, to) = line
+                .map(|line| (cell_offset(line, row.start), cell_offset(line, row.end)))
+                .unwrap_or((0, 0));
             let content = highlighted_lines
-                .get(absolute_line)
-                .map(|line| {
-                    slice_spans_by_columns(
-                        line,
-                        horizontal_scroll,
-                        horizontal_scroll.saturating_add(visible_width),
-                    )
-                })
+                .get(row.line)
+                .map(|spans| slice_spans_by_columns(spans, from, to))
                 .unwrap_or_else(|| {
                     vec![Span::styled(
-                        selection::slice_by_columns(
-                            line,
-                            horizontal_scroll,
-                            horizontal_scroll.saturating_add(visible_width),
-                        ),
+                        line.map(|line| selection::slice_by_columns(line, from, to))
+                            .unwrap_or_default(),
                         Style::default().fg(theme.text),
                     )]
                 });
-            let mut spans = vec![Span::styled(prefix, line_number_style)];
+
+            let mut spans = vec![Span::styled(prefix, number_style)];
             spans.extend(content);
+            let _ = index;
             Line::from(spans)
         })
         .collect::<Vec<_>>();
@@ -400,29 +420,31 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
         inner,
     );
 
-    let Some(cursor) = cursor else {
+    let Some((caret_row, caret_column)) = caret else {
         return;
     };
-    if cursor.line < start
-        || cursor.line >= lines.len()
-        || cursor.line >= start.saturating_add(usize::from(inner.height))
-    {
+    if caret_row < start || caret_row >= start.saturating_add(usize::from(inner.height)) {
         return;
     }
-    let cursor_column = app
-        .editor_cursor_display_column()
-        .unwrap_or_default()
-        .saturating_sub(horizontal_scroll)
-        .min(visible_width);
     let x = inner
         .x
-        .saturating_add(prefix_width as u16)
-        .saturating_add(cursor_column as u16)
+        .saturating_add(gutter_width as u16)
+        .saturating_add(caret_column as u16)
         .min(inner.right().saturating_sub(1));
     let y = inner
         .y
-        .saturating_add(cursor.line.saturating_sub(start) as u16);
+        .saturating_add(caret_row.saturating_sub(start) as u16);
     frame.set_cursor_position(Position::new(x, y));
+}
+
+/// How many terminal cells of `line` sit before grapheme column `column`.
+fn cell_offset(line: &str, column: usize) -> usize {
+    let byte = line
+        .grapheme_indices(true)
+        .nth(column)
+        .map(|(index, _)| index)
+        .unwrap_or(line.len());
+    UnicodeWidthStr::width(&line[..byte])
 }
 
 fn slice_spans_by_columns(spans: &[Span<'static>], start: usize, end: usize) -> Vec<Span<'static>> {
@@ -1478,6 +1500,88 @@ mod tests {
                 });
 
         assert!(rendered.contains("UNSAVED CHANGES"));
+    }
+
+    #[test]
+    fn a_long_editor_line_wraps_and_only_its_first_row_is_numbered() {
+        let path = std::env::temp_dir().join(format!(
+            "markr-view-wrap-{}-{:?}.md",
+            std::process::id(),
+            Instant::now()
+        ));
+        // One line far too long for the reader, so it has to wrap.
+        let long = ["alpha"; 60].join(" ");
+        std::fs::write(&path, &long).expect("wrap fixture");
+
+        let workspace = Workspace::open(Some(path.clone()), true).expect("workspace");
+        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+        app.update(Message::Key {
+            key: crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('e'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            at: Instant::now(),
+        });
+        assert!(app.editor_wrap().len() > 1, "the fixture line should wrap");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| super::render(frame, &app))
+            .expect("render wrapped editor");
+
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<Vec<char>> = (0..app.editor_wrap().len() as u16)
+            .map(|index| {
+                (0..120)
+                    .map(|x| {
+                        buffer[(x, index + 2)]
+                            .symbol()
+                            .chars()
+                            .next()
+                            .unwrap_or(' ')
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // The sidebar shares the row, so find where the editor's own gutter
+        // begins rather than assuming it starts at column zero.
+        let gutter_width = app.editor_gutter_width();
+        let start = rows[0]
+            .windows(5)
+            .position(|window| window == [' ', '1', ' ', '│', ' '])
+            .expect("the first row carries its line number");
+
+        let text_of = |row: &Vec<char>| -> String {
+            row[start + gutter_width - 1..].iter().collect::<String>()
+        };
+
+        for (index, row) in rows.iter().enumerate().skip(1) {
+            let gutter: String = row[start..start + gutter_width - 1].iter().collect();
+            assert!(
+                gutter.trim().is_empty(),
+                "continuation row {index} should leave the gutter blank: {gutter:?}"
+            );
+            assert!(
+                text_of(row).trim_start().starts_with("alpha"),
+                "continuation row {index} should carry text"
+            );
+        }
+
+        // Nothing is lost or duplicated: the rows together spell the line.
+        let joined: String = rows
+            .iter()
+            .map(|row| text_of(row).trim().to_owned())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(joined.replace(' ', ""), long.replace(' ', ""));
+
+        std::fs::remove_file(path).expect("remove wrap fixture");
     }
 
     #[test]
