@@ -356,6 +356,9 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
     // Which visual row the caret is on, so its line keeps the lit number and
     // the caret itself can be placed without locating it a second time.
     let caret = cursor.map(|cursor| wrap.locate(cursor, lines));
+    let selection = app
+        .editor_selection()
+        .map(|selection| selection.normalized());
     let start = app.editor_scroll.min(wrap.len());
 
     let text = wrap
@@ -397,7 +400,7 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
             let (from, to) = line
                 .map(|line| (cell_offset(line, row.start), cell_offset(line, row.end)))
                 .unwrap_or((0, 0));
-            let content = highlighted_lines
+            let mut content = highlighted_lines
                 .get(row.line)
                 .map(|spans| slice_spans_by_columns(spans, from, to))
                 .unwrap_or_else(|| {
@@ -407,6 +410,21 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
                         Style::default().fg(theme.text),
                     )]
                 });
+
+            // The row's spans start at its own first cell, so the selection
+            // is shaded in cells relative to the row rather than to the line.
+            if let Some((selection_start, selection_end)) = selection
+                && let Some(line) = line
+                && let Some((from_cell, to_cell)) =
+                    selected_cells(*row, line, selection_start, selection_end)
+            {
+                content = shade_columns(
+                    &content,
+                    from_cell,
+                    to_cell,
+                    selection::selection_style(theme),
+                );
+            }
 
             let mut spans = vec![Span::styled(prefix, number_style)];
             spans.extend(content);
@@ -435,6 +453,39 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
         .y
         .saturating_add(caret_row.saturating_sub(start) as u16);
     frame.set_cursor_position(Position::new(x, y));
+}
+
+/// The cells of `row` that a selection covers, measured from the row's own
+/// first cell. `None` when the selection does not reach this row.
+fn selected_cells(
+    row: crate::wrap::VisualRow,
+    line: &str,
+    start: selection::CursorPosition,
+    end: selection::CursorPosition,
+) -> Option<(usize, usize)> {
+    if row.line < start.line || row.line > end.line {
+        return None;
+    }
+
+    let from = if row.line == start.line {
+        start.column.max(row.start)
+    } else {
+        row.start
+    };
+    let to = if row.line == end.line {
+        end.column.min(row.end)
+    } else {
+        row.end
+    };
+    if from >= to {
+        return None;
+    }
+
+    let origin = cell_offset(line, row.start);
+    Some((
+        cell_offset(line, from).saturating_sub(origin),
+        cell_offset(line, to).saturating_sub(origin),
+    ))
 }
 
 /// How many terminal cells of `line` sit before grapheme column `column`.
@@ -768,9 +819,20 @@ fn highlight_selection_line(
         return line.clone();
     }
 
-    let mut spans = Vec::new();
+    Line::from(shade_columns(&line.spans, start_col, end_col, style))
+}
+
+/// Repaints the graphemes between two display columns with `style`, leaving
+/// everything else as it was.
+fn shade_columns(
+    spans: &[Span<'static>],
+    start_col: usize,
+    end_col: usize,
+    style: Style,
+) -> Vec<Span<'static>> {
+    let mut result = Vec::new();
     let mut column = 0;
-    for span in &line.spans {
+    for span in spans {
         let content = span.content.as_ref();
         let mut segment = String::new();
         let mut segment_style = None;
@@ -788,7 +850,7 @@ fn highlight_selection_line(
 
             if segment_style != Some(grapheme_style) {
                 if !segment.is_empty() {
-                    spans.push(Span::styled(
+                    result.push(Span::styled(
                         std::mem::take(&mut segment),
                         segment_style.unwrap(),
                     ));
@@ -799,10 +861,10 @@ fn highlight_selection_line(
             column = grapheme_end;
         }
         if !segment.is_empty() {
-            spans.push(Span::styled(segment, segment_style.unwrap()));
+            result.push(Span::styled(segment, segment_style.unwrap()));
         }
     }
-    Line::from(spans)
+    result
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
@@ -1582,6 +1644,70 @@ mod tests {
         assert_eq!(joined.replace(' ', ""), long.replace(' ', ""));
 
         std::fs::remove_file(path).expect("remove wrap fixture");
+    }
+
+    #[test]
+    fn the_editor_paints_its_selection_across_wrapped_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "markr-view-select-{}-{:?}.md",
+            std::process::id(),
+            Instant::now()
+        ));
+        let long = ["alpha"; 60].join(" ");
+        std::fs::write(&path, &long).expect("selection fixture");
+
+        let workspace = Workspace::open(Some(path.clone()), true).expect("workspace");
+        let mut app = App::new(workspace, Picker::halfblocks(), Theme::default()).expect("app");
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+        let press = |code, modifiers| Message::Key {
+            key: crossterm::event::KeyEvent::new(code, modifiers),
+            at: Instant::now(),
+        };
+        app.update(press(
+            crossterm::event::KeyCode::Char('e'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+
+        // Select everything, which on this fixture spans several rows.
+        app.update(press(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        assert!(app.editor_selection().is_some());
+        assert!(app.editor_wrap().len() > 1, "the fixture should wrap");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| super::render(frame, &app))
+            .expect("render selected editor");
+
+        let buffer = terminal.backend().buffer();
+        let selected_background = Theme::default().accent;
+
+        // Every row of the wrapped line carries shaded cells, not just the
+        // first: a selection that stops at the wrap point would be a lie.
+        for row in 0..app.editor_wrap().len() as u16 {
+            let shaded = (0..120)
+                .filter(|x| buffer[(*x, row + 2)].style().bg == Some(selected_background))
+                .count();
+            assert!(shaded > 0, "row {row} should show part of the selection");
+        }
+
+        // And the gutter is not part of the text, so it stays unshaded.
+        let numbered = (0..120)
+            .find(|x| buffer[(*x, 2)].symbol() == "1")
+            .expect("a line number");
+        assert_ne!(
+            buffer[(numbered, 2)].style().bg,
+            Some(selected_background),
+            "the line number is not selected text"
+        );
+
+        std::fs::remove_file(path).expect("remove selection fixture");
     }
 
     #[test]

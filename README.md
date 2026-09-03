@@ -31,6 +31,7 @@ The current version can:
 - enter a raw Markdown editor for the active file, edit with familiar cursor controls and save with `Ctrl-S`;
 - place the editor cursor with the mouse, undo and redo edits and see Markdown syntax highlighting while editing;
 - soft-wrap long lines in the editor rather than scrolling sideways, and move the cursor by what is on screen;
+- select text in the editor with the keyboard or the mouse, and copy, cut and paste through the system clipboard;
 - detect files changed outside MarkR during an edit and offer explicit overwrite or reload choices;
 - start with one of three built-in color themes and switch palettes without restarting;
 - use familiar arrow-key controls alongside a small set of vim-inspired shortcuts;
@@ -110,10 +111,14 @@ When a directory is provided, MarkR recursively discovers files with the `.md`, 
 | `n` / `N` | Next / previous highlighted search match |
 | `e` | Edit the active Markdown file |
 | Mouse click in the editor | Place the editor cursor |
+| Mouse drag in the editor | Select text |
+| `Shift` + `←` / `→` / `↑` / `↓` / `Home` / `End` in the editor | Extend the selection |
+| `Ctrl-A` in the editor | Select the whole document |
+| `Ctrl-C` / `Ctrl-X` / `Ctrl-V` in the editor | Copy / cut / paste through the system clipboard |
 | `Ctrl-S` in the editor | Save edits and refresh the rendered document |
 | `Ctrl-Z` / `Ctrl-Y` in the editor | Undo / redo the last edit |
 | `Esc` in the editor | Return to the reader; confirm when edits are unsaved |
-| `Ctrl-C` in the editor | Quit; confirm when edits are unsaved |
+| `Ctrl-Q` in the editor | Quit; confirm when edits are unsaved |
 | `s` / `d` at the unsaved prompt | Save / discard changes |
 | `o` / `r` at the file-change prompt | Overwrite / reload the file |
 | `v` | Start a keyboard selection in the reader |
