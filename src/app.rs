@@ -12,6 +12,7 @@ use crate::images::ImageStore;
 use crate::layout;
 use crate::markdown::Document;
 use crate::selection::{CursorPosition, Selection};
+use crate::syntax;
 use crate::theme::{Theme, ThemeName};
 use crate::workspace::Workspace;
 
@@ -131,6 +132,9 @@ pub struct App {
     pub terminal_height: u16,
     pub error: Option<String>,
     pub editor: Option<EditorBuffer>,
+    /// The editor's Markdown highlighting, rebuilt when the buffer or the
+    /// palette moves rather than on every draw.
+    editor_highlight: syntax::HighlightCache,
     pub editor_scroll: usize,
     pub editor_horizontal_scroll: usize,
     pub unsaved_action: Option<UnsavedAction>,
@@ -245,6 +249,7 @@ impl App {
             terminal_height: 40,
             error: None,
             editor: None,
+            editor_highlight: syntax::HighlightCache::default(),
             editor_scroll: 0,
             editor_horizontal_scroll: 0,
             unsaved_action: None,
@@ -293,6 +298,11 @@ impl App {
         self.editor
             .as_ref()
             .map(EditorBuffer::cursor_display_column)
+    }
+
+    /// The highlighted form of [`Self::editor_lines`], one entry per line.
+    pub fn editor_highlight(&self) -> &[Vec<ratatui::text::Span<'static>>] {
+        self.editor_highlight.lines()
     }
 
     pub fn editor_dirty(&self) -> bool {
@@ -489,6 +499,28 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> bool {
+        let changed = self.apply(message);
+        self.sync_editor_highlight();
+        changed
+    }
+
+    /// Rebuilds the editor highlighting if the buffer or the palette has
+    /// moved since it was last built. Cheap enough to call after every
+    /// message: the common case is one comparison.
+    fn sync_editor_highlight(&mut self) {
+        let Some(revision) = self.editor.as_ref().map(EditorBuffer::revision) else {
+            self.editor_highlight.clear();
+            return;
+        };
+        if self.editor_highlight.is_current(revision, self.theme.name) {
+            return;
+        }
+        if let Some(text) = self.editor_text() {
+            self.editor_highlight.rebuild(revision, self.theme, &text);
+        }
+    }
+
+    fn apply(&mut self, message: Message) -> bool {
         match message {
             Message::Key { key, at } => {
                 let before = self.ui_snapshot();
@@ -2020,6 +2052,73 @@ mod tests {
         app.update(control_key(KeyCode::Char('y')));
         assert_eq!(app.editor_text().as_deref(), Some("# One!"));
         assert!(app.editor_dirty());
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn editor_highlighting_follows_the_buffer_and_the_palette() {
+        let (path, mut app) = temporary_document();
+
+        // Nothing to highlight until the editor is open.
+        assert!(app.editor_highlight().is_empty());
+
+        app.update(key(KeyCode::Char('e')));
+        assert_eq!(app.editor_highlight().len(), app.editor_lines().len());
+
+        // A typed newline adds a line, and the highlighting keeps pace so an
+        // index into it stays an index into the buffer.
+        app.update(key(KeyCode::End));
+        app.update(key(KeyCode::Enter));
+        app.update(key(KeyCode::Char('x')));
+        assert_eq!(app.editor_highlight().len(), app.editor_lines().len());
+
+        // Repainting the walls re-colours the source underneath.
+        let before = app.editor_highlight().to_vec();
+        app.update(key(KeyCode::Char('T')));
+        assert_ne!(app.editor_highlight(), before.as_slice());
+
+        // Leaving the editor drops the held lines.
+        app.update(control_key(KeyCode::Char('s')));
+        app.update(key(KeyCode::Esc));
+        assert!(app.editor_highlight().is_empty());
+
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    /// The text the held highlighting would actually draw.
+    fn highlighted_text(app: &App) -> String {
+        app.editor_highlight()
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn reloading_an_untouched_buffer_refreshes_the_highlighting() {
+        let (path, mut app) = temporary_document();
+
+        // The editor draws from the highlighting rather than from the buffer,
+        // so highlighting left over from the replaced file would keep the old
+        // text on screen — the one thing reloading is supposed to fix. This
+        // buffer is never edited, which is the case a per-buffer revision
+        // counter would miss.
+        app.update(key(KeyCode::Char('e')));
+        assert_eq!(highlighted_text(&app), "# One");
+
+        app.last_modified = Some(SystemTime::UNIX_EPOCH);
+        fs::write(&path, "# External").expect("external document change");
+        app.update(Message::Tick);
+        app.update(control_key(KeyCode::Char('s')));
+        app.update(key(KeyCode::Char('r')));
+
+        assert_eq!(app.editor_text().as_deref(), Some("# External"));
+        assert_eq!(highlighted_text(&app), "# External");
+
         fs::remove_file(path).expect("remove editor fixture");
     }
 

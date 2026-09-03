@@ -15,7 +15,6 @@ use crate::explorer::EntryKind;
 use crate::images::Asset;
 use crate::layout;
 use crate::selection;
-use crate::syntax;
 use crate::theme::Theme;
 
 /// Blends `color` toward `background`, keeping `keep` of the original. Dimming
@@ -349,10 +348,7 @@ fn render_editor(frame: &mut Frame, app: &App, inner: Rect) {
     let theme = app.theme;
     let lines = app.editor_lines();
     let cursor = app.editor_cursor();
-    let highlighted_lines = app
-        .editor_text()
-        .map(|text| syntax::highlight(Some("markdown"), &text, theme))
-        .unwrap_or_default();
+    let highlighted_lines = app.editor_highlight();
     let line_number_width = lines.len().max(1).to_string().len();
     let prefix_width = line_number_width.saturating_add(5);
     let visible_width = app.editor_content_width();
