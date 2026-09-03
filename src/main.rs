@@ -10,6 +10,7 @@ mod syntax;
 mod theme;
 mod view;
 mod workspace;
+mod wrap;
 
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
