@@ -7,3 +7,6 @@
 
 # Private planning notes and session context
 /local/
+
+# Lavish Editor review sessions
+/.lavish/
