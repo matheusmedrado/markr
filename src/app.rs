@@ -880,7 +880,9 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('q') => self.request_quit(at),
+            // No bare letter quits the editor. `q` is a letter people write,
+            // and a reader's shortcut has no business reaching a text field.
+            // Esc leaves, and quitting is the reader's business.
             KeyCode::Esc => self.request_cancel_editor(at),
             KeyCode::Left => self.editor_move(|editor| editor.move_left()),
             KeyCode::Right => self.editor_move(|editor| editor.move_right()),
@@ -2297,6 +2299,25 @@ mod tests {
             cursor,
             "but looking around left the caret where it was"
         );
+    }
+
+    #[test]
+    fn every_letter_can_be_typed_into_the_editor() {
+        let (path, mut app) = temporary_document();
+        app.update(key(KeyCode::Char('e')));
+
+        // `q` used to quit from inside the editor, so it could not be
+        // written — and neither could anything after it, because the unsaved
+        // prompt swallowed the next key.
+        for character in "quick brown".chars() {
+            app.update(key(KeyCode::Char(character)));
+        }
+
+        assert_eq!(app.editor_text().as_deref(), Some("quick brown# One"));
+        assert!(!app.should_quit());
+        assert!(!app.has_unsaved_prompt());
+
+        fs::remove_file(path).expect("remove editor fixture");
     }
 
     #[test]
