@@ -30,6 +30,7 @@ The current version can:
 - select and copy text inside the reader with the keyboard or mouse;
 - enter a raw Markdown editor for the active file, edit with familiar cursor controls and save with `Ctrl-S`;
 - place the editor cursor with the mouse, undo and redo edits and see Markdown syntax highlighting while editing;
+- soft-wrap long lines in the editor rather than scrolling sideways, and move the cursor by what is on screen;
 - detect files changed outside MarkR during an edit and offer explicit overwrite or reload choices;
 - start with one of three built-in color themes and switch palettes without restarting;
 - use familiar arrow-key controls alongside a small set of vim-inspired shortcuts;

@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use crate::selection::CursorPosition;
 
@@ -100,23 +99,6 @@ impl EditorBuffer {
         self.cursor.column = cursor.column.min(self.current_line_graphemes());
     }
 
-    pub fn cursor_column_at_display_width(
-        &self,
-        line_index: usize,
-        display_column: usize,
-    ) -> Option<usize> {
-        let line = self.lines.get(line_index)?;
-        let mut width: usize = 0;
-        for (index, grapheme) in line.graphemes(true).enumerate() {
-            let next_width = width.saturating_add(grapheme.width());
-            if display_column < next_width {
-                return Some(index);
-            }
-            width = next_width;
-        }
-        Some(line.graphemes(true).count())
-    }
-
     pub fn undo(&mut self) {
         let Some(previous) = self.undo_stack.pop() else {
             return;
@@ -142,32 +124,6 @@ impl EditorBuffer {
         self.break_run();
         let line_length = self.current_line_graphemes();
         self.cursor.column = self.cursor.column.saturating_add(1).min(line_length);
-    }
-
-    pub fn move_up(&mut self) {
-        self.break_run();
-        self.cursor.line = self.cursor.line.saturating_sub(1);
-        self.clamp_column();
-    }
-
-    pub fn move_down(&mut self) {
-        self.break_run();
-        self.cursor.line = self
-            .cursor
-            .line
-            .saturating_add(1)
-            .min(self.lines.len().saturating_sub(1));
-        self.clamp_column();
-    }
-
-    pub fn move_home(&mut self) {
-        self.break_run();
-        self.cursor.column = 0;
-    }
-
-    pub fn move_end(&mut self) {
-        self.break_run();
-        self.cursor.column = self.current_line_graphemes();
     }
 
     pub fn insert(&mut self, character: char) {
@@ -241,10 +197,6 @@ impl EditorBuffer {
         grapheme_byte_index(&self.lines[self.cursor.line], self.cursor.column)
     }
 
-    fn clamp_column(&mut self) {
-        self.cursor.column = self.cursor.column.min(self.current_line_graphemes());
-    }
-
     fn snapshot(&self) -> EditorSnapshot {
         EditorSnapshot {
             lines: self.lines.clone(),
@@ -294,12 +246,6 @@ impl EditorBuffer {
             .next_back()
             .is_some_and(|previous| !previous.is_whitespace())
     }
-
-    pub fn cursor_display_column(&self) -> usize {
-        let line = &self.lines[self.cursor.line];
-        let byte_index = grapheme_byte_index(line, self.cursor.column);
-        UnicodeWidthStr::width(&line[..byte_index])
-    }
 }
 
 fn grapheme_byte_index(text: &str, grapheme_index: usize) -> usize {
@@ -314,12 +260,17 @@ mod tests {
     use super::EditorBuffer;
     use crate::selection::CursorPosition;
 
+    /// `set_cursor` clamps to the line, so this parks the cursor at its end.
+    fn move_to_end_of_line(editor: &mut EditorBuffer, line: usize) {
+        editor.set_cursor(CursorPosition::new(line, usize::MAX));
+    }
+
     #[test]
     fn edits_lines_and_preserves_newlines() {
         let mut editor = EditorBuffer::from_text("# Title\nbody");
-        editor.move_end();
+        move_to_end_of_line(&mut editor, 0);
         editor.insert('!');
-        editor.move_home();
+        editor.set_cursor(CursorPosition::new(0, 0));
         editor.insert('\n');
 
         assert_eq!(editor.text(), "\n# Title!\nbody");
@@ -330,7 +281,7 @@ mod tests {
     #[test]
     fn backspace_joins_lines_at_the_start_of_a_line() {
         let mut editor = EditorBuffer::from_text("first\nsecond");
-        editor.move_down();
+        editor.set_cursor(CursorPosition::new(1, 0));
         editor.backspace();
 
         assert_eq!(editor.text(), "firstsecond");
@@ -340,25 +291,16 @@ mod tests {
     #[test]
     fn delete_joins_lines_at_the_end_of_a_line() {
         let mut editor = EditorBuffer::from_text("first\nsecond");
-        editor.move_end();
+        move_to_end_of_line(&mut editor, 0);
         editor.delete();
 
         assert_eq!(editor.text(), "firstsecond");
     }
 
     #[test]
-    fn unicode_cursor_columns_use_terminal_width() {
-        let mut editor = EditorBuffer::from_text("aé界");
-        editor.move_right();
-        editor.move_right();
-
-        assert_eq!(editor.cursor_display_column(), 2);
-    }
-
-    #[test]
     fn undoes_and_redoes_text_edits_and_restores_the_dirty_state() {
         let mut editor = EditorBuffer::from_text("hello");
-        editor.move_end();
+        move_to_end_of_line(&mut editor, 0);
         editor.insert('!');
         assert_eq!(editor.text(), "hello!");
         assert!(editor.dirty());
@@ -416,9 +358,9 @@ mod tests {
     #[test]
     fn moving_the_cursor_ends_the_run() {
         let mut editor = EditorBuffer::from_text("ab");
-        editor.move_end();
+        move_to_end_of_line(&mut editor, 0);
         editor.insert('c');
-        editor.move_home();
+        editor.set_cursor(CursorPosition::new(0, 0));
         editor.insert('z');
 
         assert_eq!(editor.text(), "zabc");
@@ -446,7 +388,7 @@ mod tests {
     #[test]
     fn a_run_of_backspaces_undoes_as_one_step() {
         let mut editor = EditorBuffer::from_text("hello");
-        editor.move_end();
+        move_to_end_of_line(&mut editor, 0);
         editor.backspace();
         editor.backspace();
         assert_eq!(editor.text(), "hel");
@@ -471,7 +413,7 @@ mod tests {
         let mut editor = EditorBuffer::from_text("hi");
         let start = editor.revision();
 
-        editor.move_end();
+        move_to_end_of_line(&mut editor, 0);
         assert_eq!(
             editor.revision(),
             start,
@@ -490,13 +432,5 @@ mod tests {
         let before_undo = editor.revision();
         editor.undo();
         assert_ne!(editor.revision(), before_undo);
-    }
-
-    #[test]
-    fn clicking_inside_a_wide_grapheme_keeps_the_cursor_at_a_grapheme_boundary() {
-        let editor = EditorBuffer::from_text("a界b");
-
-        assert_eq!(editor.cursor_column_at_display_width(0, 2), Some(1));
-        assert_eq!(editor.cursor_column_at_display_width(0, 3), Some(2));
     }
 }
