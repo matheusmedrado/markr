@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::selection::CursorPosition;
+use crate::selection::{CursorPosition, Selection};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct EditorBuffer {
@@ -16,6 +16,9 @@ pub struct EditorBuffer {
     /// buffer can compare revisions to tell whether the text it holds is
     /// still current, without comparing the text itself.
     revision: u64,
+    /// Where a selection was started, if one is in progress. The selection
+    /// runs from here to the cursor, in either direction.
+    anchor: Option<CursorPosition>,
     /// The run of same-shaped edits in progress, and the cursor it left
     /// behind. Typing a word records one undo snapshot rather than one per
     /// character; the run ends when the shape changes, the cursor moves
@@ -64,6 +67,7 @@ impl EditorBuffer {
             redo_stack: Vec::new(),
             dirty: false,
             revision: next_revision(),
+            anchor: None,
             run: None,
         }
     }
@@ -86,6 +90,119 @@ impl EditorBuffer {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// The selection in progress, if it covers anything at all. An anchor
+    /// sitting on the cursor selects nothing, and is reported as nothing.
+    pub fn selection(&self) -> Option<Selection> {
+        let anchor = self.anchor?;
+        (anchor != self.cursor).then(|| Selection::new(anchor, self.cursor))
+    }
+
+    /// Starts a selection here, unless one is already under way. Called
+    /// before a movement that should extend one rather than replace it.
+    pub fn begin_selection(&mut self) {
+        if self.anchor.is_none() {
+            self.anchor = Some(self.cursor);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.anchor = None;
+    }
+
+    pub fn select_all(&mut self) {
+        let last = self.lines.len().saturating_sub(1);
+        self.anchor = Some(CursorPosition::new(0, 0));
+        self.cursor = CursorPosition::new(last, self.lines[last].graphemes(true).count());
+        self.break_run();
+    }
+
+    /// The selected text, with the newlines it spans.
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection_bounds()?;
+        if start.line == end.line {
+            return Some(
+                grapheme_slice(&self.lines[start.line], start.column, end.column).to_owned(),
+            );
+        }
+
+        let mut text = grapheme_slice(
+            &self.lines[start.line],
+            start.column,
+            self.lines[start.line].graphemes(true).count(),
+        )
+        .to_owned();
+        for line in &self.lines[start.line + 1..end.line] {
+            text.push('\n');
+            text.push_str(line);
+        }
+        text.push('\n');
+        text.push_str(grapheme_slice(&self.lines[end.line], 0, end.column));
+        Some(text)
+    }
+
+    /// Removes the selection, if there is one, as a single undo step.
+    pub fn delete_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection_bounds() else {
+            return false;
+        };
+        self.record_edit(EditRun::Delete, true);
+        self.remove_range(start, end);
+        self.anchor = None;
+        self.run = None;
+        true
+    }
+
+    /// Inserts `text` at the cursor, replacing the selection if there is one.
+    /// The whole paste is one undo step, however many lines it carries.
+    pub fn insert_str(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        if text.is_empty() {
+            return;
+        }
+
+        self.record_edit(EditRun::Insert, true);
+        if let Some((start, end)) = self.selection_bounds() {
+            self.remove_range(start, end);
+        }
+        self.anchor = None;
+        for character in text.chars() {
+            self.write(character);
+        }
+        self.run = None;
+    }
+
+    /// The selection as an ordered pair, earliest position first.
+    fn selection_bounds(&self) -> Option<(CursorPosition, CursorPosition)> {
+        self.selection().map(|selection| selection.normalized())
+    }
+
+    /// Cuts the text between two positions out of the buffer and leaves the
+    /// cursor where it began. Records nothing: the caller owns the undo step.
+    fn remove_range(&mut self, start: CursorPosition, end: CursorPosition) {
+        let tail = grapheme_slice(
+            &self.lines[end.line],
+            end.column,
+            self.lines[end.line].graphemes(true).count(),
+        )
+        .to_owned();
+        let head = grapheme_slice(&self.lines[start.line], 0, start.column).to_owned();
+
+        self.lines.drain(start.line + 1..=end.line);
+        self.lines[start.line] = head + &tail;
+        self.cursor = start;
+    }
+
+    /// Writes one character at the cursor. Records nothing.
+    fn write(&mut self, character: char) {
+        if character == '\n' {
+            self.split_line();
+            return;
+        }
+        let byte_index = self.current_byte_index();
+        self.lines[self.cursor.line].insert(byte_index, character);
+        self.cursor.column += 1;
     }
 
     pub fn mark_clean(&mut self) {
@@ -127,23 +244,29 @@ impl EditorBuffer {
     }
 
     pub fn insert(&mut self, character: char) {
+        // Typing over a selection replaces it, and both halves are one undo
+        // step: taking back the letter should bring the replaced text back.
+        if let Some((start, end)) = self.selection_bounds() {
+            self.record_edit(EditRun::Insert, true);
+            self.remove_range(start, end);
+            self.anchor = None;
+            self.write(character);
+            self.run = None;
+            return;
+        }
+
         // A newline and the space that ends a word are the places a reader
         // expects one undo to stop, so neither joins the run around it.
         let boundary = character == '\n' || self.ends_a_word(character);
         self.record_edit(EditRun::Insert, boundary);
-
-        if character == '\n' {
-            self.split_line();
-        } else {
-            let byte_index = self.current_byte_index();
-            self.lines[self.cursor.line].insert(byte_index, character);
-            self.cursor.column += 1;
-        }
-
+        self.write(character);
         self.run = (!boundary).then_some((EditRun::Insert, self.cursor));
     }
 
     pub fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor.column > 0 {
             self.record_edit(EditRun::Backspace, false);
             let line = &mut self.lines[self.cursor.line];
@@ -165,6 +288,9 @@ impl EditorBuffer {
     }
 
     pub fn delete(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let line = self.cursor.line;
         if self.cursor.column < self.current_line_graphemes() {
             self.record_edit(EditRun::Delete, false);
@@ -209,6 +335,7 @@ impl EditorBuffer {
         self.cursor = snapshot.cursor;
         self.dirty = self.text() != self.saved_text;
         self.revision = next_revision();
+        self.anchor = None;
         self.break_run();
     }
 
@@ -246,6 +373,13 @@ impl EditorBuffer {
             .next_back()
             .is_some_and(|previous| !previous.is_whitespace())
     }
+}
+
+/// The text of `line` between two grapheme columns.
+fn grapheme_slice(line: &str, start: usize, end: usize) -> &str {
+    let from = grapheme_byte_index(line, start);
+    let to = grapheme_byte_index(line, end);
+    &line[from..to.max(from)]
 }
 
 fn grapheme_byte_index(text: &str, grapheme_index: usize) -> usize {
@@ -395,6 +529,157 @@ mod tests {
 
         editor.undo();
         assert_eq!(editor.text(), "hello");
+    }
+
+    /// Selects from `from` to `to`.
+    fn select(editor: &mut EditorBuffer, from: CursorPosition, to: CursorPosition) {
+        editor.set_cursor(from);
+        editor.begin_selection();
+        editor.set_cursor(to);
+    }
+
+    #[test]
+    fn an_anchor_on_the_cursor_selects_nothing() {
+        let mut editor = EditorBuffer::from_text("hello");
+        editor.begin_selection();
+
+        assert!(editor.selection().is_none());
+        assert!(editor.selected_text().is_none());
+    }
+
+    #[test]
+    fn a_selection_reads_back_the_text_it_covers() {
+        let mut editor = EditorBuffer::from_text("hello world");
+        select(
+            &mut editor,
+            CursorPosition::new(0, 6),
+            CursorPosition::new(0, 11),
+        );
+
+        assert_eq!(editor.selected_text().as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn a_selection_reads_back_across_lines_with_its_newlines() {
+        let mut editor = EditorBuffer::from_text("first\nsecond\nthird");
+        select(
+            &mut editor,
+            CursorPosition::new(0, 3),
+            CursorPosition::new(2, 2),
+        );
+
+        assert_eq!(editor.selected_text().as_deref(), Some("st\nsecond\nth"));
+    }
+
+    #[test]
+    fn a_backwards_selection_reads_the_same_as_a_forwards_one() {
+        let mut editor = EditorBuffer::from_text("hello world");
+        select(
+            &mut editor,
+            CursorPosition::new(0, 11),
+            CursorPosition::new(0, 6),
+        );
+
+        assert_eq!(editor.selected_text().as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn typing_over_a_selection_replaces_it_in_one_undo_step() {
+        let mut editor = EditorBuffer::from_text("hello world");
+        select(
+            &mut editor,
+            CursorPosition::new(0, 6),
+            CursorPosition::new(0, 11),
+        );
+        editor.insert('t');
+
+        assert_eq!(editor.text(), "hello t");
+        assert!(editor.selection().is_none(), "the selection is spent");
+
+        editor.undo();
+        assert_eq!(
+            editor.text(),
+            "hello world",
+            "one undo brings back what was replaced"
+        );
+    }
+
+    #[test]
+    fn backspace_over_a_selection_removes_only_the_selection() {
+        let mut editor = EditorBuffer::from_text("hello world");
+        select(
+            &mut editor,
+            CursorPosition::new(0, 5),
+            CursorPosition::new(0, 11),
+        );
+        editor.backspace();
+
+        assert_eq!(editor.text(), "hello", "the character before it survives");
+        assert_eq!(editor.cursor(), CursorPosition::new(0, 5));
+    }
+
+    #[test]
+    fn deleting_a_selection_that_spans_lines_joins_what_is_left() {
+        let mut editor = EditorBuffer::from_text("first\nsecond\nthird");
+        select(
+            &mut editor,
+            CursorPosition::new(0, 2),
+            CursorPosition::new(2, 2),
+        );
+        editor.delete();
+
+        assert_eq!(editor.text(), "fiird");
+        assert_eq!(editor.cursor(), CursorPosition::new(0, 2));
+    }
+
+    #[test]
+    fn selecting_everything_covers_the_whole_buffer() {
+        let mut editor = EditorBuffer::from_text("one\ntwo\nthree");
+        editor.select_all();
+
+        assert_eq!(editor.selected_text().as_deref(), Some("one\ntwo\nthree"));
+    }
+
+    #[test]
+    fn pasting_replaces_the_selection_and_undoes_as_one_step() {
+        let mut editor = EditorBuffer::from_text("hello world");
+        select(
+            &mut editor,
+            CursorPosition::new(0, 6),
+            CursorPosition::new(0, 11),
+        );
+        editor.insert_str("there\nfriend");
+
+        assert_eq!(editor.text(), "hello there\nfriend");
+        assert_eq!(editor.cursor(), CursorPosition::new(1, 6));
+
+        editor.undo();
+        assert_eq!(editor.text(), "hello world");
+    }
+
+    #[test]
+    fn pasting_normalises_windows_line_endings() {
+        let mut editor = EditorBuffer::from_text("");
+        editor.insert_str("one\r\ntwo\rthree");
+
+        assert_eq!(editor.text(), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn undo_does_not_bring_a_selection_back_with_it() {
+        let mut editor = EditorBuffer::from_text("hello world");
+        select(
+            &mut editor,
+            CursorPosition::new(0, 6),
+            CursorPosition::new(0, 11),
+        );
+        editor.insert('t');
+        editor.undo();
+
+        assert!(
+            editor.selection().is_none(),
+            "a restored buffer has a cursor, not a selection"
+        );
     }
 
     #[test]

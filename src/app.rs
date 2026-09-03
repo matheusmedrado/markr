@@ -306,6 +306,16 @@ impl App {
         self.editor_highlight.lines()
     }
 
+    /// The selection inside the editor, if any.
+    pub fn editor_selection(&self) -> Option<Selection> {
+        self.editor.as_ref().and_then(EditorBuffer::selection)
+    }
+
+    /// The text that selection covers.
+    pub fn editor_selected_text(&self) -> Option<String> {
+        self.editor.as_ref().and_then(EditorBuffer::selected_text)
+    }
+
     /// Where each source line falls on screen once wrapped.
     pub fn editor_wrap(&self) -> &wrap::WrapLayout {
         &self.editor_wrap
@@ -563,7 +573,7 @@ impl App {
 
     /// Moves the cursor `rows` visual rows, keeping the cell it is aiming for
     /// so a short row passed through on the way does not capture it.
-    fn editor_move_rows(&mut self, rows: isize) {
+    fn editor_move_rows(&mut self, rows: isize, extend: bool) {
         let Some(editor) = self.editor.as_ref() else {
             return;
         };
@@ -583,6 +593,11 @@ impl App {
         let position = self.editor_wrap.position_at(target, goal, lines);
 
         if let Some(editor) = self.editor.as_mut() {
+            if extend {
+                editor.begin_selection();
+            } else {
+                editor.clear_selection();
+            }
             editor.set_cursor(position);
         }
         // `set_cursor` cannot know this was a vertical move, so the aim is
@@ -591,7 +606,7 @@ impl App {
     }
 
     /// Moves the cursor to the start or the end of the visual row it is on.
-    fn editor_move_to_row_edge(&mut self, to_end: bool) {
+    fn editor_move_to_row_edge(&mut self, to_end: bool, extend: bool) {
         let Some(editor) = self.editor.as_ref() else {
             return;
         };
@@ -612,7 +627,11 @@ impl App {
             self.editor_wrap.last_printed_column(index, lines)
         };
 
-        self.set_editor_cursor(CursorPosition::new(row.line, column));
+        self.editor_move_cursor(extend, |editor| {
+            editor.set_cursor(CursorPosition::new(row.line, column));
+        });
+        self.editor_goal_column = None;
+        self.ensure_editor_cursor_visible();
     }
 
     fn apply(&mut self, message: Message) -> bool {
@@ -705,7 +724,12 @@ impl App {
             return;
         }
 
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        // Ctrl-C copies inside the editor, the way Ctrl-S saves there.
+        // Leaving is Esc, and quitting is the reader's business.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('c')
+            && !self.is_editing()
+        {
             self.request_quit(at);
             return;
         }
@@ -854,6 +878,10 @@ impl App {
             self.editor_goal_column = None;
         }
 
+        // Shift turns a move into a drag of the selection. It only means that
+        // on the movement keys: a shifted letter is simply a capital.
+        let extend = key.modifiers.contains(KeyModifiers::SHIFT);
+
         let page_amount = self.document_height().saturating_sub(1).max(1);
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
@@ -868,11 +896,33 @@ impl App {
                     return;
                 }
                 KeyCode::Char('u') => {
-                    self.editor_move_rows(-(page_amount as isize));
+                    self.editor_move_rows(-(page_amount as isize), false);
                     return;
                 }
                 KeyCode::Char('d') => {
-                    self.editor_move_rows(page_amount as isize);
+                    self.editor_move_rows(page_amount as isize, false);
+                    return;
+                }
+                KeyCode::Char('a') => {
+                    self.editor_move(|editor| editor.select_all());
+                    return;
+                }
+                // Ctrl-C is the editor's copy, so quitting straight from it
+                // needs a chord of its own rather than none at all.
+                KeyCode::Char('q') => {
+                    self.request_quit(at);
+                    return;
+                }
+                KeyCode::Char('c') => {
+                    self.copy_editor_selection(at);
+                    return;
+                }
+                KeyCode::Char('x') => {
+                    self.cut_editor_selection(at);
+                    return;
+                }
+                KeyCode::Char('v') => {
+                    self.paste_into_editor(at);
                     return;
                 }
                 _ => {}
@@ -884,17 +934,17 @@ impl App {
             // and a reader's shortcut has no business reaching a text field.
             // Esc leaves, and quitting is the reader's business.
             KeyCode::Esc => self.request_cancel_editor(at),
-            KeyCode::Left => self.editor_move(|editor| editor.move_left()),
-            KeyCode::Right => self.editor_move(|editor| editor.move_right()),
+            KeyCode::Left => self.editor_move_cursor(extend, |editor| editor.move_left()),
+            KeyCode::Right => self.editor_move_cursor(extend, |editor| editor.move_right()),
             // Up and down travel by what is on screen, not by what is in the
             // file: a wrapped line is several rows, and skipping all of them
             // at once would make a long paragraph impossible to move through.
-            KeyCode::Up => self.editor_move_rows(-1),
-            KeyCode::Down => self.editor_move_rows(1),
-            KeyCode::Home => self.editor_move_to_row_edge(false),
-            KeyCode::End => self.editor_move_to_row_edge(true),
-            KeyCode::PageUp => self.editor_move_rows(-(page_amount as isize)),
-            KeyCode::PageDown => self.editor_move_rows(page_amount as isize),
+            KeyCode::Up => self.editor_move_rows(-1, extend),
+            KeyCode::Down => self.editor_move_rows(1, extend),
+            KeyCode::Home => self.editor_move_to_row_edge(false, extend),
+            KeyCode::End => self.editor_move_to_row_edge(true, extend),
+            KeyCode::PageUp => self.editor_move_rows(-(page_amount as isize), extend),
+            KeyCode::PageDown => self.editor_move_rows(page_amount as isize, extend),
             KeyCode::Backspace => self.editor_move(|editor| editor.backspace()),
             KeyCode::Delete => self.editor_move(|editor| editor.delete()),
             KeyCode::Enter => self.editor_move(|editor| editor.insert('\n')),
@@ -1028,6 +1078,54 @@ impl App {
         }
     }
 
+    /// Moves the cursor, extending the selection when Shift is down and
+    /// dropping it otherwise.
+    fn editor_move_cursor(&mut self, extend: bool, action: impl FnOnce(&mut EditorBuffer)) {
+        if let Some(editor) = self.editor.as_mut() {
+            if extend {
+                editor.begin_selection();
+            } else {
+                editor.clear_selection();
+            }
+            action(editor);
+        }
+    }
+
+    fn copy_editor_selection(&mut self, at: Instant) {
+        let Some(text) = self.editor_selected_text() else {
+            return;
+        };
+        match write_clipboard(&text) {
+            Ok(()) => self.set_message("copied", at),
+            Err(error) => self.set_message(format!("Cannot copy: {error}"), at),
+        }
+    }
+
+    fn cut_editor_selection(&mut self, at: Instant) {
+        let Some(text) = self.editor_selected_text() else {
+            return;
+        };
+        // Only remove it once it is safely on the clipboard, so a failure
+        // there does not take the text with it.
+        match write_clipboard(&text) {
+            Ok(()) => {
+                self.editor_move(|editor| {
+                    editor.delete_selection();
+                });
+                self.set_message("cut", at);
+            }
+            Err(error) => self.set_message(format!("Cannot cut: {error}"), at),
+        }
+    }
+
+    fn paste_into_editor(&mut self, at: Instant) {
+        match read_clipboard() {
+            Ok(text) if text.is_empty() => {}
+            Ok(text) => self.editor_move(|editor| editor.insert_str(&text)),
+            Err(error) => self.set_message(format!("Cannot paste: {error}"), at),
+        }
+    }
+
     /// Brings the cursor's visual row on screen, and keeps the viewport from
     /// scrolling past the end of a wrapped document.
     fn ensure_editor_cursor_visible(&mut self) {
@@ -1158,6 +1256,15 @@ impl App {
                     None => false,
                 }
             }
+            MouseEventKind::Drag(MouseButton::Left) if self.is_editing() => {
+                match self.editor_position_at(event.column, event.row) {
+                    Some(position) => {
+                        self.drag_editor_selection(position);
+                        true
+                    }
+                    None => false,
+                }
+            }
             MouseEventKind::Drag(MouseButton::Left) if !self.is_editing() => {
                 match self.document_position_at(event.column, event.row) {
                     Some(position) => {
@@ -1268,12 +1375,25 @@ impl App {
         self.end_glide();
     }
 
+    /// Places the cursor and drops any selection: a plain click starts over.
     fn set_editor_cursor(&mut self, position: CursorPosition) {
         self.editor_goal_column = None;
         if let Some(editor) = self.editor.as_mut() {
+            editor.clear_selection();
             editor.set_cursor(position);
             self.ensure_editor_cursor_visible();
         }
+    }
+
+    /// Drags the far end of a selection to `position`, starting one from
+    /// wherever the cursor was if the drag has only just begun.
+    fn drag_editor_selection(&mut self, position: CursorPosition) {
+        self.editor_goal_column = None;
+        if let Some(editor) = self.editor.as_mut() {
+            editor.begin_selection();
+            editor.set_cursor(position);
+        }
+        self.ensure_editor_cursor_visible();
     }
 
     fn editor_position_at(&self, screen_x: u16, screen_y: u16) -> Option<CursorPosition> {
@@ -1867,6 +1987,17 @@ fn toggle_focus(focus: Focus) -> Focus {
     }
 }
 
+fn write_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    clipboard.set_text(text.to_owned())?;
+    Ok(())
+}
+
+fn read_clipboard() -> Result<String, Box<dyn std::error::Error>> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    Ok(clipboard.get_text()?)
+}
+
 fn modified_time(path: Option<&Path>) -> Option<SystemTime> {
     path.and_then(|path| fs::metadata(path).ok()?.modified().ok())
 }
@@ -1915,6 +2046,13 @@ mod tests {
     fn control_key(code: KeyCode) -> Message {
         Message::Key {
             key: KeyEvent::new(code, KeyModifiers::CONTROL),
+            at: Instant::now(),
+        }
+    }
+
+    fn shift_key(code: KeyCode) -> Message {
+        Message::Key {
+            key: KeyEvent::new(code, KeyModifiers::SHIFT),
             at: Instant::now(),
         }
     }
@@ -2092,7 +2230,7 @@ mod tests {
         app.update(key(KeyCode::Char('e')));
         app.update(key(KeyCode::End));
         app.update(key(KeyCode::Char('!')));
-        app.update(control_key(KeyCode::Char('c')));
+        app.update(control_key(KeyCode::Char('q')));
 
         assert!(app.has_unsaved_prompt());
         assert!(!app.should_quit());
@@ -2316,6 +2454,127 @@ mod tests {
         assert_eq!(app.editor_text().as_deref(), Some("quick brown# One"));
         assert!(!app.should_quit());
         assert!(!app.has_unsaved_prompt());
+
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn shift_and_an_arrow_extend_a_selection() {
+        let (path, mut app) = temporary_document();
+        app.update(key(KeyCode::Char('e')));
+
+        assert!(app.editor_selection().is_none(), "nothing selected yet");
+
+        for _ in 0..3 {
+            app.update(shift_key(KeyCode::Right));
+        }
+
+        let selected = app.editor_selected_text().expect("a selection");
+        assert_eq!(selected, "# O");
+
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn moving_without_shift_drops_the_selection() {
+        let (path, mut app) = temporary_document();
+        app.update(key(KeyCode::Char('e')));
+        app.update(shift_key(KeyCode::Right));
+        assert!(app.editor_selection().is_some());
+
+        app.update(key(KeyCode::Right));
+
+        assert!(
+            app.editor_selection().is_none(),
+            "an unshifted move starts over rather than extending"
+        );
+
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn control_a_selects_the_whole_document() {
+        let (path, mut app) = temporary_document();
+        app.update(key(KeyCode::Char('e')));
+        app.update(control_key(KeyCode::Char('a')));
+
+        assert_eq!(app.editor_selected_text().as_deref(), Some("# One"));
+
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn typing_over_a_selection_replaces_it() {
+        let (path, mut app) = temporary_document();
+        app.update(key(KeyCode::Char('e')));
+        app.update(control_key(KeyCode::Char('a')));
+        app.update(key(KeyCode::Char('x')));
+
+        assert_eq!(app.editor_text().as_deref(), Some("x"));
+        assert!(app.editor_selection().is_none());
+
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn a_capital_letter_is_typed_rather_than_extending_a_selection() {
+        let (path, mut app) = temporary_document();
+        app.update(key(KeyCode::Char('e')));
+
+        // Shift reaches the editor on a capital too; only the movement keys
+        // may read it as "extend the selection".
+        app.update(shift_key(KeyCode::Char('X')));
+
+        assert_eq!(app.editor_text().as_deref(), Some("X# One"));
+        assert!(app.editor_selection().is_none());
+
+        fs::remove_file(path).expect("remove editor fixture");
+    }
+
+    #[test]
+    fn dragging_the_mouse_selects_and_clicking_starts_over() {
+        let mut app = readme_app();
+        app.update(Message::Resize {
+            width: 120,
+            height: 40,
+            at: Instant::now(),
+        });
+        app.update(key(KeyCode::Char('e')));
+
+        let inner = crate::layout::editor_inner(app.reader_outer_area());
+        let text_start = inner.x + app.editor_gutter_width() as u16;
+
+        app.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            text_start + 1,
+            inner.y,
+        ));
+        app.update(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            text_start + 5,
+            inner.y,
+        ));
+
+        let selected = app.editor_selected_text().expect("a dragged selection");
+        assert_eq!(selected.chars().count(), 4);
+
+        // A plain click afterwards drops it rather than extending.
+        app.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            text_start + 2,
+            inner.y,
+        ));
+        assert!(app.editor_selection().is_none());
+    }
+
+    #[test]
+    fn control_q_still_offers_to_save_before_quitting() {
+        let (path, mut app) = temporary_document();
+        app.update(key(KeyCode::Char('e')));
+        app.update(key(KeyCode::Char('!')));
+        app.update(control_key(KeyCode::Char('q')));
+
+        assert!(app.has_unsaved_prompt(), "quitting from the editor prompts");
 
         fs::remove_file(path).expect("remove editor fixture");
     }
